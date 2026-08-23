@@ -51,7 +51,9 @@ fn run_codex() -> Result<()> {
     let installation = recentlydivorced::Installation::load(&root.root)?;
     if recentlydivorced::intercepts_stock_update(&args) {
         recentlydivorced::run_stock_update(&installation, &args[1..])?;
-        anyhow::bail!("stock updated; RecentlyDivorced reconciliation is not installed yet")
+        let stock = recentlydivorced::load_stock_record(&root.root)?;
+        recentlydivorced::repair_public_link(&installation, &manager, &stock.original_target)?;
+        return Ok(());
     }
     let payload = recentlydivorced::dispatch_target(&root.root, &args)?;
     Err(Command::new(payload).args(args).exec().into())

@@ -70,6 +70,11 @@ pub fn write_stock_record(root: &Path, record: &StockRecord) -> Result<()> {
     Ok(())
 }
 
+pub fn load_stock_record(root: &Path) -> Result<StockRecord> {
+    let contents = fs::read_to_string(root.join(STOCK_RECORD_FILE)).context("read stock record")?;
+    toml::from_str(&contents).context("parse stock record")
+}
+
 pub fn initialize_installation(root: &Path, installation: &Installation, stock: StockLink) -> Result<()> {
     fs::create_dir_all(root.join("payloads")).context("create payload store")?;
     fs::create_dir_all(root.join("manager")).context("create manager store")?;
@@ -355,6 +360,7 @@ mod tests {
         write_stock_record(temp.path(), &record).unwrap();
         let decoded: StockRecord = toml::from_str(&fs::read_to_string(temp.path().join(STOCK_RECORD_FILE)).unwrap()).unwrap();
         assert_eq!(decoded, record);
+        assert_eq!(load_stock_record(temp.path()).unwrap(), record);
     }
 
     #[test]
