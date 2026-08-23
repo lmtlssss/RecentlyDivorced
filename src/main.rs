@@ -28,8 +28,6 @@ struct Bootstrap {
     #[arg(long, hide = true)]
     rd_payload: Option<PathBuf>,
     #[arg(long, hide = true)]
-    rd_payload_identity: Option<String>,
-    #[arg(long, hide = true)]
     rd_release_manifest: Option<PathBuf>,
     #[arg(long, hide = true)]
     rd_release_signature: Option<PathBuf>,
