@@ -54,6 +54,27 @@ index 9a4a679..66a1e34 100644
          assert_eq!(update.patch.title, None);
          assert_eq!(update.patch.first_user_message, None);
          assert!(update.patch.updated_at.is_some());
+@@ -743,7 +744,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resume_preserves_existing_display_metadata_and_initializes_missing_title() {
++    fn resume_refreshes_existing_preview_and_initializes_missing_title() {
+         let thread_id = ThreadId::new();
+         let mut metadata = codex_state::ThreadMetadataBuilder::new(
+             thread_id,
+@@ -766,7 +767,10 @@ mod tests {
+         let sync = ThreadMetadataSync::for_resume(&params, Some(&metadata));
+         let update = sync.take_pending_update().expect("pending metadata update");
+ 
+-        assert_eq!(update.patch.preview, None);
++        assert_eq!(
++            update.patch.preview.as_deref(),
++            Some("first textual user message")
++        );
+         assert_eq!(update.patch.first_user_message, None);
+         assert_eq!(
+             update.patch.title.as_deref(),
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
 index 192e6be..109fbde 100644
 --- a/codex-rs/thread-store/src/types.rs

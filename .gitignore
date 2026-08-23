@@ -2,3 +2,6 @@ references/
 tmp/
 build/
 *.log
+.claude/
+AGENTS.md
+CLAUDE.md
