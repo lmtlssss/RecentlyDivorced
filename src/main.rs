@@ -75,7 +75,7 @@ fn run_codex() -> Result<()> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     let installation = recentlydivorced::Installation::load(&root.root)?;
     if recentlydivorced::intercepts_stock_update(&args) {
-        recentlydivorced::run_stock_update(&installation, &args[1..])?;
+        recentlydivorced::reconcile_stock_update(&root.root, &installation, &args[1..])?;
         let stock = recentlydivorced::load_stock_record(&root.root)?;
         recentlydivorced::repair_public_link(&installation, &manager, &stock.original_target)?;
         return Ok(());

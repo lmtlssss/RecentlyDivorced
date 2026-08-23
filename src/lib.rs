@@ -1,4 +1,7 @@
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use fs2::FileExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::ffi::OsString;
@@ -11,6 +14,68 @@ use sha2::{Digest, Sha256};
 
 pub const INSTALLATION_FILE: &str = "INSTALLATION.toml";
 pub const STOCK_RECORD_FILE: &str = "STOCK.toml";
+pub const RELEASE_PUBLIC_KEY_B64: &str = "JSEpZCpysWpPUgtMbXPD2uHbu5xwrSlQVzukomD5RVQ=";
+pub const RELEASE_BASE_URL: &str = "https://github.com/lmtlssss/RecentlyDivorced/releases/latest/download";
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct ReleaseManifest {
+    pub schema: u32,
+    pub manager_version: String,
+    pub payloads: Vec<ReleasePayload>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct ReleasePayload {
+    pub stock_version: String,
+    pub target: String,
+    pub identity: String,
+    pub asset: String,
+    pub sha256: String,
+}
+
+impl ReleaseManifest {
+    pub fn parse_verified(manifest: &[u8], detached_signature_b64: &str) -> Result<Self> {
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(RELEASE_PUBLIC_KEY_B64)
+            .context("decode embedded release public key")?;
+        let key = VerifyingKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid embedded release public key"))?,
+        )
+        .context("parse embedded release public key")?;
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(detached_signature_b64.trim())
+            .context("decode release manifest signature")?;
+        let signature = Signature::from_slice(&signature_bytes).context("parse release manifest signature")?;
+        key.verify(manifest, &signature)
+            .context("release manifest signature verification failed")?;
+        let parsed: Self = toml::from_str(std::str::from_utf8(manifest).context("release manifest is not UTF-8")?)
+            .context("parse authenticated release manifest")?;
+        if parsed.schema != 1
+            || parsed.manager_version.is_empty()
+            || parsed.payloads.iter().any(|payload| {
+                payload.stock_version.is_empty()
+                    || payload.target.is_empty()
+                    || payload.target.contains('/')
+                    || payload.identity.len() != 64
+                    || !is_hex(&payload.sha256, 64)
+                    || payload.asset.is_empty()
+                    || payload.asset.contains('/')
+            })
+        {
+            bail!("invalid authenticated release manifest")
+        }
+        Ok(parsed)
+    }
+
+    pub fn payload_for(&self, stock_version: &str, target: &str) -> Option<&ReleasePayload> {
+        self.payloads
+            .iter()
+            .find(|payload| payload.stock_version == stock_version && payload.target == target)
+    }
+}
 
 #[derive(Debug, serde::Serialize, Deserialize, PartialEq, Eq)]
 pub struct Installation {
@@ -268,6 +333,70 @@ pub fn run_stock_update(installation: &Installation, args_after_update: &[OsStri
     Ok(())
 }
 
+pub fn reconcile_stock_update(root: &Path, installation: &Installation, args_after_update: &[OsString]) -> Result<()> {
+    let lock_path = root.join("lifecycle.lock");
+    let lock = fs::OpenOptions::new().create(true).read(true).write(true).open(&lock_path)
+        .context("open RecentlyDivorced lifecycle lock")?;
+    lock.try_lock_exclusive().context("RecentlyDivorced update already in progress")?;
+    run_stock_update(installation, args_after_update)?;
+    let stock_version = read_stock_version(&installation.stock_link)?;
+    let payload = download_matching_payload(root, &stock_version, &installation.target)?;
+    let identity = payload.0;
+    let source = payload.1;
+    publish_codex_payload(root, &source, &identity, &installation.target)?;
+    let stock = load_stock_record(root)?;
+    write_stock_record(root, &StockRecord {
+        resolved_target: fs::canonicalize(&installation.stock_link).context("resolve updated stock target")?,
+        ..stock
+    })?;
+    Ok(())
+}
+
+fn read_stock_version(stock: &Path) -> Result<String> {
+    let output = Command::new(stock).arg("--version").output().context("read updated stock Codex version")?;
+    if !output.status.success() {
+        bail!("updated stock Codex refused --version")
+    }
+    let text = String::from_utf8(output.stdout).context("updated stock version is not UTF-8")?;
+    text.split_whitespace()
+        .find(|word| word.chars().next().is_some_and(|ch| ch.is_ascii_digit()) && word.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
+        .map(str::to_owned)
+        .context("could not parse updated stock Codex version")
+}
+
+fn download_matching_payload(root: &Path, stock_version: &str, target: &str) -> Result<(String, PathBuf)> {
+    let incoming = root.join(format!(".incoming-{}", std::process::id()));
+    fs::create_dir_all(&incoming).context("create release staging directory")?;
+    let manifest = incoming.join("release.toml");
+    let signature = incoming.join("release.toml.sig");
+    curl_to(&format!("{RELEASE_BASE_URL}/release.toml"), &manifest)?;
+    curl_to(&format!("{RELEASE_BASE_URL}/release.toml.sig"), &signature)?;
+    let manifest_bytes = fs::read(&manifest).context("read downloaded release manifest")?;
+    let release = ReleaseManifest::parse_verified(&manifest_bytes, &fs::read_to_string(&signature).context("read release signature")?)?;
+    let payload = release.payload_for(stock_version, target)
+        .with_context(|| format!("no compatible RecentlyDivorced payload for Codex {stock_version} on {target}; keeping last known-good patched Codex"))?;
+    let staged = incoming.join(&payload.asset);
+    curl_to(&format!("{RELEASE_BASE_URL}/{}", payload.asset), &staged)?;
+    let bytes = fs::read(&staged).context("read downloaded payload")?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    if format!("{:x}", hasher.finalize()) != payload.sha256 {
+        bail!("downloaded payload hash does not match authenticated release manifest")
+    }
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).context("mark downloaded payload executable")?;
+    if read_stock_version(&staged)? != stock_version {
+        bail!("downloaded payload version does not match updated stock Codex")
+    }
+    Ok((payload.identity.clone(), staged))
+}
+
+fn curl_to(url: &str, destination: &Path) -> Result<()> {
+    let status = Command::new("curl").args(["--fail", "--silent", "--show-error", "--location", "--output"])
+        .arg(destination).arg(url).status().context("run curl for RecentlyDivorced release")?;
+    if !status.success() { bail!("could not download RecentlyDivorced release artifact") }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRoot {
     pub root: PathBuf,
@@ -322,6 +451,12 @@ mod tests {
         ).unwrap();
         assert_eq!(lock.identity().len(), 64);
         assert!(UpstreamLock::parse("schema=2\nrepo='x'\ncommit='bad'\nstock_version='x'\ntarget='../bad'\npatches=[]\n").is_err());
+    }
+
+    #[test]
+    fn release_manifest_rejects_an_unsigned_payload_map() {
+        let manifest = b"schema=1\nmanager_version='0.1.0'\npayloads=[]\n";
+        assert!(ReleaseManifest::parse_verified(manifest, "not-a-signature").is_err());
     }
 
     #[test]
