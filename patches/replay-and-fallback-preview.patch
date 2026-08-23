@@ -124,6 +124,24 @@ index 989075a..3794e9a 100644
      if metadata.title.is_empty() {
          let title = strip_user_message_prefix(user.message.as_str());
          if !title.is_empty() {
+@@ -334,7 +339,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn event_msg_thread_goal_sets_preview_only_and_later_user_sets_message_title() {
++    fn event_msg_later_user_replaces_goal_preview_and_preserves_first_title() {
+         let mut metadata = metadata_for_test();
+         let goal_item =
+             RolloutItem::EventMsg(EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
+@@ -369,7 +374,7 @@ mod tests {
+ 
+         apply_rollout_item(&mut metadata, &user_item, "test-provider");
+ 
+-        assert_eq!(metadata.preview.as_deref(), Some("optimize the benchmark"));
++        assert_eq!(metadata.preview.as_deref(), Some("next normal prompt"));
+         assert_eq!(
+             metadata.first_user_message.as_deref(),
+             Some("next normal prompt")
 diff --git a/codex-rs/state/src/model/thread_metadata.rs b/codex-rs/state/src/model/thread_metadata.rs
 index c032ff1..b7d187b 100644
 --- a/codex-rs/state/src/model/thread_metadata.rs
@@ -137,3 +155,41 @@ index c032ff1..b7d187b 100644
      pub preview: Option<String>,
      /// The sandbox policy (stringified enum).
      pub sandbox_policy: String,
+diff --git a/codex-rs/rollout/src/tests.rs b/codex-rs/rollout/src/tests.rs
+index 0e6180a..5e60fc1 100644
+--- a/codex-rs/rollout/src/tests.rs
++++ b/codex-rs/rollout/src/tests.rs
+@@ -1156,7 +1156,7 @@ async fn test_goal_first_thread_reads_later_user_message() {
+     assert_eq!(page.items.len(), 1);
+     let item = &page.items[0];
+     assert_eq!(item.thread_id, Some(thread_id_from_uuid(uuid)));
+-    assert_eq!(item.preview.as_deref(), Some("optimize the benchmark"));
++    assert_eq!(item.preview.as_deref(), Some("run the benchmark"));
+     assert_eq!(
+         item.first_user_message.as_deref(),
+         Some("run the benchmark")
+     );
+ }
+ 
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+index f27dd8d..ee25319 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+@@ -649,7 +649,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
+     );
+     assert_eq!(forked_thread.forked_from_id, Some(source_thread_id.clone()));
+     if history_mode == ThreadHistoryMode::Legacy {
+-        assert_eq!(forked_thread.preview, "first");
++        assert_eq!(forked_thread.preview, "second");
+     }
+     assert_eq!(
+         std::fs::read_to_string(source_path.as_path())?,
+@@ -735,7 +735,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
+                 },
+             })
+             .await?;
+-        assert_eq!(ephemeral_fork.preview, "first");
++        assert_eq!(ephemeral_fork.preview, "second");
+     }
+ 
+     Ok(())

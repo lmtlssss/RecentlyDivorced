@@ -5,5 +5,5 @@ stock_version = "0.149.0"
 target = "x86_64-unknown-linux-gnu"
 patches = [
   "a8caf256693434bd56606b392d5f723bad58f7ee4cd74b0f01ce15fded5295d9",
-  "6b8b293721f4fe2fb38e9b91ab2dd0469f8974b8bee8c2d9a4996f50b32f93e7",
+  "309f06caaace05d7aadc7b61795ba3cb2b7efccfaeea49f91c8d72fb8028fc75",
 ]

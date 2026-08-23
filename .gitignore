@@ -1,6 +1,7 @@
 references/
 tmp/
 build/
+target/
 *.log
 .claude/
 AGENTS.md
