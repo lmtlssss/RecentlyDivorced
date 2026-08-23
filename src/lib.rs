@@ -114,6 +114,15 @@ pub fn intercepts_stock_update(args: &[OsString]) -> bool {
     args.first().is_some_and(|arg| arg == "update")
 }
 
+pub fn current_payload(root: &Path) -> Result<PathBuf> {
+    let payload = fs::canonicalize(root.join("current/bin/codex")).context("resolve current payload")?;
+    let payload_root = fs::canonicalize(root.join("payloads")).context("resolve payload root")?;
+    if !payload.is_file() || !payload.starts_with(&payload_root) {
+        bail!("current payload is outside the owned payload store")
+    }
+    Ok(payload)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRoot {
     pub root: PathBuf,
@@ -199,5 +208,17 @@ mod tests {
         assert!(intercepts_stock_update(&[OsString::from("update")]));
         assert!(!intercepts_stock_update(&[OsString::from("exec"), OsString::from("update")]));
         assert!(!intercepts_stock_update(&[OsString::from("--version")]));
+    }
+
+    #[test]
+    fn current_payload_must_stay_in_owned_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("recentlydivorced");
+        let payload = root.join("payloads/a/bin/codex");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "payload").unwrap();
+        fs::create_dir_all(root.join("current").parent().unwrap()).unwrap();
+        symlink("payloads/a", root.join("current")).unwrap();
+        assert_eq!(current_payload(&root).unwrap(), payload);
     }
 }
