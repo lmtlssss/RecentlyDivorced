@@ -5,7 +5,7 @@ tag="${1:?usage: package-release.sh <tag> <manager> <codex> <output-dir>}"
 manager="${2:?missing manager binary}"
 codex="${3:?missing patched Codex binary}"
 out="${4:?missing output directory}"
-target="x86_64-unknown-linux-musl"
+target="${RECENTLYDIVORCED_TARGET:-x86_64-unknown-linux-gnu}"
 key="${RECENTLYDIVORCED_SIGNING_KEY:-$HOME/.config/recentlydivorced-release/ed25519-private.pem}"
 
 [[ -x "$manager" && -x "$codex" && -f "$key" ]] || { echo "missing executable or signing key" >&2; exit 1; }

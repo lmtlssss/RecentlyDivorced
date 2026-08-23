@@ -3,7 +3,7 @@ set -euo pipefail
 
 release_base="${RECENTLYDIVORCED_RELEASE_BASE:-https://github.com/lmtlssss/RecentlyDivorced/releases/latest/download}"
 root="${XDG_DATA_HOME:-$HOME/.local/share}/recentlydivorced"
-target="x86_64-unknown-linux-musl"
+target="x86_64-unknown-linux-gnu"
 manager_asset="recentlydivorced-$target"
 payload_asset="codex-$target"
 

@@ -12,24 +12,22 @@ permissions:
   contents: write
 
 jobs:
-  linux-musl:
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: install cross compiler
-        run: cargo install cross --locked
       - name: fetch and patch exact Codex upstream
         run: |
           commit=$(sed -n 's/^commit = "\(.*\)"$/\1/p' upstream.lock)
           git clone --filter=blob:none https://github.com/openai/codex.git codex
           git -C codex checkout "$commit"
           scripts/apply-patch.sh codex
-      - name: build portable manager
-        run: cross build --release --target x86_64-unknown-linux-musl
+      - name: build manager
+        run: cargo build --release --locked
       - name: build patched Codex
         working-directory: codex/codex-rs
-        run: cross build --release --locked -p codex-cli --target x86_64-unknown-linux-musl
+        run: cargo build --release --locked -p codex-cli
       - name: package signed release
         env:
           RECENTLYDIVORCED_SIGNING_KEY: ${{ runner.temp }}/recentlydivorced-ed25519.pem
@@ -37,7 +35,7 @@ jobs:
         run: |
           printf '%s' "$SIGNING_KEY" > "$RECENTLYDIVORCED_SIGNING_KEY"
           chmod 600 "$RECENTLYDIVORCED_SIGNING_KEY"
-          scripts/package-release.sh "${{ inputs.tag }}" target/x86_64-unknown-linux-musl/release/recentlydivorced codex/codex-rs/target/x86_64-unknown-linux-musl/release/codex release
+          scripts/package-release.sh "${{ inputs.tag }}" target/release/recentlydivorced codex/codex-rs/target/release/codex release
       - name: publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

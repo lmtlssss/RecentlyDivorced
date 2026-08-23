@@ -58,7 +58,7 @@ active patched Codex updated.
 ## scope
 
 - Linux CLI, x86_64 only for the first release.
-- Portable musl payloads; no systemd requirement.
+- x86_64 GNU/Linux payloads; no systemd requirement.
 - Systemd may later be offered only as optional protection against external
   stock-link drift. `codex update` is the portable core.
 - macOS, Windows, and the desktop app are deliberately out of scope.
