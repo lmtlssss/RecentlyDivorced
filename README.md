@@ -11,10 +11,6 @@ user prompt          ──►  stock codex hook  ──►  threads.preview
                                                        └─ /resume row
 ```
 
-first prompt stays provenance.
-title stays title.
-conversation stays untouched.
-
 ## install
 
 ```bash
@@ -35,55 +31,23 @@ sh install.sh
 curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/uninstall.sh | sh
 ```
 
-## behavior
+## what it does
 
-```text
-stock codex
-──────────────────────────────────────────────────────────────
+Codex runs the plugin after each submitted user prompt. The plugin updates that
+thread's `preview` value with the submitted prompt. `/resume` reads
+`preview`, so it shows the latest prompt instead of the original thread
+prompt.
 
-user prompt           hook input
-session id            active thread id
-prompt                latest human ask
-```
-
-```text
-plugin write
-──────────────────────────────────────────────────────────────
-
-UPDATE threads
-SET preview = prompt
-WHERE id = session_id
-```
-
-one field.
-one row.
-no transcript rewrite.
+It does not modify the Codex executable, transcript, title, first prompt,
+model settings, caches, auth, tool calls, or token use.
 
 ## existing threads
 
-install runs one backfill:
+install reads each existing thread rollout once and sets its preview to the
+last user prompt. New prompts use the hook.
 
-```text
-thread rollout        ──►  last user input  ──►  preview
-```
-
-after that, normal prompts use the live hook.
-
-## stock behavior
-
-```text
-not touched
-──────────────────────────────────────────────────────────────
-
-codex executable       model cache        prompt cache
-session cache          auth               plugins
-conversation           title              first prompt
-token usage            tool calls         model selection
-```
-
-RecentlyDivorced is a stock Codex plugin.
-codex updates keep the plugin.
-uninstall removes the plugin, marketplace, and hook trust record.
+Codex updates keep the installed plugin. Uninstall removes the plugin,
+marketplace, and hook trust record.
 
 ## release files
 
