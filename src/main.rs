@@ -13,6 +13,8 @@ struct Bootstrap {
     #[arg(long, hide = true)]
     rd_bootstrap_uninstall: bool,
     #[arg(long, hide = true)]
+    rd_repair: bool,
+    #[arg(long, hide = true)]
     rd_root: Option<PathBuf>,
     #[arg(long, hide = true)]
     rd_public_link: Option<PathBuf>,
@@ -40,6 +42,14 @@ fn main() -> Result<()> {
     }
     if bootstrap.rd_bootstrap_uninstall {
         anyhow::bail!("bootstrap uninstall implementation is not installed yet")
+    }
+    if bootstrap.rd_repair {
+        let manager = env::current_exe()?;
+        let root = recentlydivorced::InstallRoot::from_manager_path(&manager)?;
+        let installation = recentlydivorced::Installation::load(&root.root)?;
+        let stock = recentlydivorced::load_stock_record(&root.root)?;
+        recentlydivorced::repair_public_link(&installation, &manager, &stock.original_target)?;
+        return Ok(());
     }
     anyhow::bail!("RecentlyDivorced is installed through its curl bootstrap; run codex normally")
 }

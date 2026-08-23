@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch Codex links for RecentlyDivorced repair
+
+[Path]
+PathChanged=%h/.local/bin/codex
+PathChanged=%h/.codex/packages/standalone/current
+Unit=recentlydivorced-repair.service
+
+[Install]
+WantedBy=default.target
