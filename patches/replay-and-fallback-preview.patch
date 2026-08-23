@@ -1,0 +1,139 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs
+index b59078c..a4a3ee6 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs
+@@ -205,7 +205,7 @@ pub struct Thread {
+     pub forked_from_id: Option<String>,
+     /// The ID of the parent thread. This will only be set if this thread is a subagent.
+     pub parent_thread_id: Option<String>,
+-    /// Usually the first user message in the thread, if available.
++    /// Latest non-empty user prompt in the thread, if available.
+     pub preview: String,
+     /// Whether the thread is ephemeral and should not be materialized on disk.
+     pub ephemeral: bool,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index c648db9..7d53dec 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -5873,6 +5873,7 @@ fn summary_from_thread_metadata(metadata: &ThreadMetadata) -> ConversationSummar
+ fn preview_from_rollout_items(items: &[RolloutItem]) -> String {
+     items
+         .iter()
++        .rev()
+         .find_map(|item| match item {
+             RolloutItem::ResponseItem(item) => match codex_core::parse_turn_item(&item.item) {
+                 Some(codex_protocol::items::TurnItem::UserMessage(user)) => Some(user.message()),
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index a5b8040..fd86c22 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -55,7 +55,7 @@ pub struct ThreadItem {
+     pub thread_id: Option<ThreadId>,
+     /// First user message captured for this thread, if any.
+     pub first_user_message: Option<String>,
+-    /// Best available user-facing preview for discovery and list display.
++    /// Latest non-empty user prompt for discovery, list display, and resume.
+     pub preview: Option<String>,
+     /// The user-selected section in SQLite-owned metadata.
+     pub section: Option<codex_state::ThreadSection>,
+@@ -780,9 +779,9 @@ async fn build_thread_item(
+     cwd_filters: Option<&[PathBuf]>,
+     updated_at: Option<String>,
+ ) -> Option<ThreadItem> {
+-    // Read head and detect preview-bearing events; goal previews can appear before
+-    // the first normal user message.
+-    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT)
++    // A resume preview is the last human ask, so legacy rollout summaries must
++    // observe the whole append-only transcript.
++    let summary = read_rollout_summary(&path)
+         .await
+         .unwrap_or_default();
+     if !allowed_sources.is_empty()
+@@ -1102,24 +1101,14 @@ impl<'a> ProviderMatcher<'a> {
+     }
+ }
+ 
+-async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTailSummary> {
++async fn read_rollout_summary(path: &Path) -> io::Result<HeadTailSummary> {
+     let mut lines = compression::open_rollout_line_reader(path).await?;
+     let mut summary = HeadTailSummary::default();
+-    let mut lines_scanned = 0usize;
+-
+-    while lines_scanned < head_limit
+-        || (summary.saw_session_meta
+-            && (summary.preview.is_none() || summary.first_user_message.is_none())
+-            && lines_scanned < head_limit + USER_EVENT_SCAN_LIMIT)
+-    {
+-        let line_opt = lines.next_line().await?;
+-        let Some(line) = line_opt else { break };
++    while let Some(line) = lines.next_line().await? {
+         let trimmed = line.trim();
+         if trimmed.is_empty() {
+             continue;
+         }
+-        lines_scanned += 1;
+-
+         let parsed: Result<RolloutLine, _> = serde_json::from_str(trimmed);
+         let rollout_line = match parsed {
+             Ok(rollout_line) => rollout_line,
+@@ -1190,22 +1179,18 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
+                         }
+                         _ => false,
+                     };
+-                    if summary.preview.is_none() {
+-                        summary.preview = Some(preview.clone());
+-                    }
+                     if is_user_message && summary.first_user_message.is_none() {
+-                        summary.first_user_message = Some(preview);
++                        summary.first_user_message = Some(preview.clone());
++                    }
++                    if is_user_message {
++                        summary.preview = Some(preview);
++                    } else if summary.preview.is_none() {
++                        summary.preview = Some(preview);
+                     }
+                 }
+             }
+         }
+ 
+-        if summary.saw_session_meta
+-            && summary.preview.is_some()
+-            && summary.first_user_message.is_some()
+-        {
+-            break;
+-        }
+     }
+ 
+     Ok(summary)
+ }
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 989075a..3794e9a 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -140,7 +140,12 @@ fn apply_user_message(metadata: &mut ThreadMetadata, user: &UserMessageEvent) {
+     if metadata.first_user_message.is_none() {
+         metadata.first_user_message = preview.clone();
+     }
+-    set_preview_if_empty(metadata, preview);
++    // Keep discovery/resume pointed at the latest real user ask. Goals remain
++    // a fallback through set_preview_if_empty, while first_user_message and
++    // title preserve their original provenance semantics.
++    if preview.is_some() {
++        metadata.preview = preview;
++    }
+     if metadata.title.is_empty() {
+         let title = strip_user_message_prefix(user.message.as_str());
+         if !title.is_empty() {
+diff --git a/codex-rs/state/src/model/thread_metadata.rs b/codex-rs/state/src/model/thread_metadata.rs
+index c032ff1..b7d187b 100644
+--- a/codex-rs/state/src/model/thread_metadata.rs
++++ b/codex-rs/state/src/model/thread_metadata.rs
+@@ -158,7 +158,7 @@ pub struct ThreadMetadata {
+     pub title: String,
+     /// Explicit user-facing thread name, if one was set.
+     pub name: Option<String>,
+-    /// Best available user-facing preview for discovery and list display.
++    /// Latest non-empty user prompt for discovery, list display, and resume.
+     pub preview: Option<String>,
+     /// The sandbox policy (stringified enum).
+     pub sandbox_policy: String,

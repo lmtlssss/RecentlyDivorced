@@ -1,0 +1,4 @@
+references/
+tmp/
+build/
+*.log
