@@ -8,6 +8,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub const INSTALLATION_FILE: &str = "INSTALLATION.toml";
+pub const STOCK_RECORD_FILE: &str = "STOCK.toml";
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Installation {
@@ -39,6 +40,26 @@ impl Installation {
 pub struct StockLink {
     pub original_target: PathBuf,
     pub dynamic_target: PathBuf,
+}
+
+#[derive(Debug, serde::Serialize, Deserialize, PartialEq, Eq)]
+pub struct StockRecord {
+    pub original_target: PathBuf,
+    pub dynamic_target: PathBuf,
+}
+
+impl From<StockLink> for StockRecord {
+    fn from(value: StockLink) -> Self {
+        Self { original_target: value.original_target, dynamic_target: value.dynamic_target }
+    }
+}
+
+pub fn write_stock_record(root: &Path, record: &StockRecord) -> Result<()> {
+    let encoded = toml::to_string(record).context("encode stock record")?;
+    let stage = root.join(".STOCK.toml.new");
+    fs::write(&stage, encoded).context("write stock record stage")?;
+    fs::rename(stage, root.join(STOCK_RECORD_FILE)).context("publish stock record")?;
+    Ok(())
 }
 
 impl StockLink {
@@ -269,5 +290,17 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".into(),
         };
         run_stock_update(&installation, &[OsString::from("--check")]).unwrap();
+    }
+
+    #[test]
+    fn stock_record_round_trips_without_resolving_current() {
+        let temp = tempfile::tempdir().unwrap();
+        let record = StockRecord {
+            original_target: PathBuf::from("../stock/current/codex"),
+            dynamic_target: temp.path().join("stock/current/codex"),
+        };
+        write_stock_record(temp.path(), &record).unwrap();
+        let decoded: StockRecord = toml::from_str(&fs::read_to_string(temp.path().join(STOCK_RECORD_FILE)).unwrap()).unwrap();
+        assert_eq!(decoded, record);
     }
 }
