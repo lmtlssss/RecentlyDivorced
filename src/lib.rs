@@ -185,6 +185,18 @@ pub fn promote_payload(root: &Path, payload_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn repair_public_link(installation: &Installation, manager: &Path, original_stock_target: &Path) -> Result<()> {
+    let existing = fs::read_link(&installation.public_link).context("read public codex link")?;
+    if existing != manager && existing != original_stock_target {
+        bail!("public codex link is owned by another target")
+    }
+    let parent = installation.public_link.parent().context("public link has no parent")?;
+    let stage = parent.join(".codex-recentlydivorced.new");
+    symlink(manager, &stage).context("stage public manager link")?;
+    fs::rename(stage, &installation.public_link).context("publish public manager link")?;
+    Ok(())
+}
+
 pub fn dispatch_target(root: &Path, args: &[OsString]) -> Result<PathBuf> {
     Installation::load(root)?;
     if intercepts_stock_update(args) {
@@ -388,5 +400,17 @@ mod tests {
         promote_payload(&root, &second).unwrap();
         assert_eq!(fs::canonicalize(root.join("current")).unwrap(), fs::canonicalize(&second).unwrap());
         assert_eq!(fs::canonicalize(root.join("previous")).unwrap(), fs::canonicalize(&first).unwrap());
+    }
+
+    #[test]
+    fn repair_reclaims_only_original_stock_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("bin/codex"); fs::create_dir_all(public.parent().unwrap()).unwrap();
+        let stock = temp.path().join("stock/current/codex"); fs::create_dir_all(stock.parent().unwrap()).unwrap(); fs::write(&stock, "stock").unwrap();
+        let manager = temp.path().join("rd/manager/current/recentlydivorced"); fs::create_dir_all(manager.parent().unwrap()).unwrap(); fs::write(&manager, "manager").unwrap();
+        symlink("../stock/current/codex", &public).unwrap();
+        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: stock, target: "x86_64-unknown-linux-gnu".into() };
+        repair_public_link(&installation, &manager, &PathBuf::from("../stock/current/codex")).unwrap();
+        assert_eq!(fs::read_link(public).unwrap(), manager);
     }
 }
