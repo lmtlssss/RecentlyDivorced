@@ -2,8 +2,6 @@
 
 codex resume previews the last human ask.
 
-bro nobody with adhd remembers wtf is what that way.
-
 ```text
 RECENTLYDIVORCED
 ──────────────────────────────────────────────────────────────
