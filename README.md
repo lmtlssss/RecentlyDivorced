@@ -1,61 +1,102 @@
-# RecentlyDivorced
+# recentlydivorced
 
-Codex `/resume` should show the last thing you asked, not the prompt that
-started the thread.
+codex resume previews the last human ask.
 
-> bro nobody with adhd remembers wtf is what that way
+bro nobody with adhd remembers wtf is what that way.
 
 ```text
-first prompt  -> provenance and title
-latest prompt -> /resume preview
+RECENTLYDIVORCED
+──────────────────────────────────────────────────────────────
+
+user prompt          ──►  stock codex hook  ──►  threads.preview
+                                                       │
+                                                       └─ /resume row
 ```
 
-RecentlyDivorced is a small stock-Codex plugin. It does not replace, fork, wrap,
-or rebuild Codex.
+first prompt stays provenance.
+title stays title.
+conversation stays untouched.
 
 ## install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/install.sh | sh
 ```
 
-Then use `codex` exactly as normal. Codex owns the plugin installation and
-keeps it when Codex updates.
+inspect first:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/install.sh
+less install.sh
+sh install.sh
+```
 
 ## uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/uninstall.sh | sh
 ```
 
-That removes the plugin and its marketplace. Stock Codex was never modified.
-
-## the whole primitive
+## behavior
 
 ```text
-Codex UserPromptSubmit hook
-  -> session_id + submitted human prompt
-  -> UPDATE threads SET preview = prompt WHERE id = session_id
-  -> /resume shows the last prompt
+stock codex
+──────────────────────────────────────────────────────────────
+
+user prompt           hook input
+session id            active thread id
+prompt                latest human ask
 ```
 
-The hook is asynchronous. It does not block a prompt, scan transcripts, change
-the conversation, alter a title, change model or prompt caches, touch auth, or
-adjust token use. Its only write is the existing thread `preview` metadata
-field that `/resume` already reads.
+```text
+plugin write
+──────────────────────────────────────────────────────────────
 
-## why this survives updates
+UPDATE threads
+SET preview = prompt
+WHERE id = session_id
+```
 
-RecentlyDivorced uses Codex’s public plugin marketplace and lifecycle-hook
-system. The helper is a tiny Rust binary downloaded by the curl installer; the
-Codex executable stays stock. Updates preserve the configured plugin, so the
-same hook continues to run.
+one field.
+one row.
+no transcript rewrite.
 
-## scope
+## existing threads
 
-- Linux CLI, x86_64 GNU/Linux.
-- Normal Codex plugin install and removal.
-- No macOS, Windows, or desktop app surface.
+install runs one backfill:
 
-The upstream clone in `references/` was used to verify the hook contract and
-the stock SQLite schema. It is not a forked runtime.
+```text
+thread rollout        ──►  last user input  ──►  preview
+```
+
+after that, normal prompts use the live hook.
+
+## stock behavior
+
+```text
+not touched
+──────────────────────────────────────────────────────────────
+
+codex executable       model cache        prompt cache
+session cache          auth               plugins
+conversation           title              first prompt
+token usage            tool calls         model selection
+```
+
+recentlydivorced is a stock codex plugin.
+codex updates keep the plugin.
+uninstall removes the plugin, marketplace, and hook trust record.
+
+## release files
+
+```text
+file                                            use
+──────────────────────────────────────────────────────────────
+recentlydivorced-x86_64-unknown-linux-gnu      hook helper
+```
+
+## build
+
+```bash
+cargo test --locked --manifest-path plugins/recentlydivorced/runtime/Cargo.toml
+```
