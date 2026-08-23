@@ -1,11 +1,38 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::ffi::OsString;
 use std::path::Component;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub const INSTALLATION_FILE: &str = "INSTALLATION.toml";
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct Installation {
+    pub schema: u32,
+    pub installation_id: String,
+    pub public_link: PathBuf,
+    pub stock_link: PathBuf,
+    pub target: String,
+}
+
+impl Installation {
+    pub fn load(root: &Path) -> Result<Self> {
+        let contents = fs::read_to_string(root.join(INSTALLATION_FILE)).context("read installation marker")?;
+        let installation: Self = toml::from_str(&contents).context("parse installation marker")?;
+        if installation.schema != 1
+            || installation.installation_id.is_empty()
+            || !installation.public_link.is_absolute()
+            || !installation.stock_link.is_absolute()
+            || installation.target.contains('/')
+            || installation.target.is_empty()
+        {
+            bail!("invalid RecentlyDivorced installation marker")
+        }
+        Ok(installation)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StockLink {
@@ -83,6 +110,10 @@ fn is_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+pub fn intercepts_stock_update(args: &[OsString]) -> bool {
+    args.first().is_some_and(|arg| arg == "update")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRoot {
     pub root: PathBuf,
@@ -98,10 +129,7 @@ impl InstallRoot {
             .and_then(Path::parent)
             .context("manager is not stored beneath manager/current")?
             .to_path_buf();
-        let marker = root.join(INSTALLATION_FILE);
-        if !marker.is_file() {
-            bail!("RecentlyDivorced installation marker is missing: {}", marker.display());
-        }
+        Installation::load(&root)?;
         Ok(Self { root, manager })
     }
 }
@@ -117,7 +145,14 @@ mod tests {
         let root = temp.path().join("recentlydivorced");
         let version = root.join("manager/0.1.0");
         fs::create_dir_all(&version).unwrap();
-        fs::write(root.join(INSTALLATION_FILE), "schema = 1\n").unwrap();
+        fs::write(
+            root.join(INSTALLATION_FILE),
+            format!(
+                "schema=1\ninstallation_id='test'\npublic_link='{}'\nstock_link='{}'\ntarget='x86_64-unknown-linux-gnu'\n",
+                root.join("bin/codex").display(),
+                root.join("stock/codex").display(),
+            ),
+        ).unwrap();
         let binary = version.join("recentlydivorced");
         fs::write(&binary, "manager").unwrap();
         let current = root.join("manager/current");
@@ -147,5 +182,22 @@ mod tests {
         let link = StockLink::capture(&public, &temp.path().join("recentlydivorced")).unwrap();
         assert_eq!(link.original_target, PathBuf::from("../stock/current/codex"));
         assert_eq!(link.dynamic_target, stock);
+    }
+
+    #[test]
+    fn installation_marker_rejects_relative_public_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(INSTALLATION_FILE),
+            "schema=1\ninstallation_id='abc'\npublic_link='bin/codex'\nstock_link='/tmp/stock'\ntarget='x86_64-unknown-linux-gnu'\n",
+        ).unwrap();
+        assert!(Installation::load(temp.path()).is_err());
+    }
+
+    #[test]
+    fn only_exact_update_is_intercepted() {
+        assert!(intercepts_stock_update(&[OsString::from("update")]));
+        assert!(!intercepts_stock_update(&[OsString::from("exec"), OsString::from("update")]));
+        assert!(!intercepts_stock_update(&[OsString::from("--version")]));
     }
 }
