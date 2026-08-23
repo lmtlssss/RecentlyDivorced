@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use std::env;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(disable_help_subcommand = true)]
@@ -24,5 +26,9 @@ fn main() -> Result<()> {
 }
 
 fn run_codex() -> Result<()> {
-    anyhow::bail!("RecentlyDivorced manager payload is not installed yet")
+    let manager = env::current_exe()?;
+    let root = recentlydivorced::InstallRoot::from_manager_path(&manager)?;
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    let payload = recentlydivorced::dispatch_target(&root.root, &args)?;
+    Err(Command::new(payload).args(args).exec().into())
 }

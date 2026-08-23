@@ -123,6 +123,14 @@ pub fn current_payload(root: &Path) -> Result<PathBuf> {
     Ok(payload)
 }
 
+pub fn dispatch_target(root: &Path, args: &[OsString]) -> Result<PathBuf> {
+    Installation::load(root)?;
+    if intercepts_stock_update(args) {
+        bail!("stock update reconciliation is not installed yet")
+    }
+    current_payload(root)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRoot {
     pub root: PathBuf,
@@ -220,5 +228,21 @@ mod tests {
         fs::create_dir_all(root.join("current").parent().unwrap()).unwrap();
         symlink("payloads/a", root.join("current")).unwrap();
         assert_eq!(current_payload(&root).unwrap(), payload);
+    }
+
+    #[test]
+    fn normal_dispatch_preserves_non_update_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("recentlydivorced");
+        let payload = root.join("payloads/a/bin/codex");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, "payload").unwrap();
+        symlink("payloads/a", root.join("current")).unwrap();
+        fs::write(
+            root.join(INSTALLATION_FILE),
+            format!("schema=1\ninstallation_id='test'\npublic_link='{}'\nstock_link='{}'\ntarget='x86_64-unknown-linux-gnu'\n", root.join("bin/codex").display(), root.join("stock/codex").display()),
+        ).unwrap();
+        assert_eq!(dispatch_target(&root, &[OsString::from("exec")]).unwrap(), payload);
+        assert!(dispatch_target(&root, &[OsString::from("update")]).is_err());
     }
 }
