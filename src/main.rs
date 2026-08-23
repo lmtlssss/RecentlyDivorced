@@ -24,9 +24,15 @@ struct Bootstrap {
     #[arg(long, hide = true)]
     rd_installation_id: Option<String>,
     #[arg(long, hide = true)]
+    rd_created_public_link: bool,
+    #[arg(long, hide = true)]
     rd_payload: Option<PathBuf>,
     #[arg(long, hide = true)]
     rd_payload_identity: Option<String>,
+    #[arg(long, hide = true)]
+    rd_release_manifest: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    rd_release_signature: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -41,9 +47,17 @@ fn main() -> Result<()> {
         let target = bootstrap.rd_target.ok_or_else(|| anyhow::anyhow!("missing target"))?;
         let installation_id = bootstrap.rd_installation_id.ok_or_else(|| anyhow::anyhow!("missing installation id"))?;
         let payload = bootstrap.rd_payload.ok_or_else(|| anyhow::anyhow!("missing patched Codex payload"))?;
-        let payload_identity = bootstrap.rd_payload_identity.ok_or_else(|| anyhow::anyhow!("missing payload identity"))?;
+        let manifest = bootstrap.rd_release_manifest.ok_or_else(|| anyhow::anyhow!("missing authenticated release manifest"))?;
+        let signature = bootstrap.rd_release_signature.ok_or_else(|| anyhow::anyhow!("missing release manifest signature"))?;
         let stock = recentlydivorced::StockLink::capture(&public_link, &root)?;
-        let installation = recentlydivorced::Installation { schema: 1, installation_id, public_link, stock_link: stock.dynamic_target.clone(), target };
+        let payload_identity = recentlydivorced::verify_bootstrap_payload(
+            &manifest,
+            &signature,
+            &payload,
+            &stock.dynamic_target,
+            &target,
+        )?;
+        let installation = recentlydivorced::Installation { schema: 1, installation_id, public_link, stock_link: stock.dynamic_target.clone(), target, created_public_link: bootstrap.rd_created_public_link };
         recentlydivorced::initialize_installation(&root, &installation, stock.clone())?;
         let manager = recentlydivorced::publish_manager(&root, &env::current_exe()?, env!("CARGO_PKG_VERSION"))?;
         recentlydivorced::publish_codex_payload(&root, &payload, &payload_identity, &installation.target)?;

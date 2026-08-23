@@ -84,6 +84,8 @@ pub struct Installation {
     pub public_link: PathBuf,
     pub stock_link: PathBuf,
     pub target: String,
+    #[serde(default)]
+    pub created_public_link: bool,
 }
 
 impl Installation {
@@ -298,9 +300,22 @@ pub fn repair_public_link(installation: &Installation, manager: &Path, original_
 }
 
 pub fn restore_stock_link(installation: &Installation, manager: &Path, stock: &StockRecord) -> Result<()> {
-    fs::read_link(&installation.public_link).context("read public codex link")?;
-    if !same_target(&installation.public_link, manager) {
+    let existing = match fs::read_link(&installation.public_link) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && installation.created_public_link => return Ok(()),
+        Err(error) => return Err(error).context("read public codex link"),
+    };
+    let manager_owned = same_target(&installation.public_link, manager);
+    let already_stock = existing == stock.original_target;
+    if !manager_owned && !already_stock {
         bail!("public codex link is no longer RecentlyDivorced-owned")
+    }
+    if installation.created_public_link {
+        fs::remove_file(&installation.public_link).context("remove RecentlyDivorced PATH shadow")?;
+        return Ok(())
+    }
+    if already_stock {
+        return Ok(())
     }
     let parent = installation.public_link.parent().context("public link has no parent")?;
     let stage = parent.join(".codex-stock.new");
@@ -352,6 +367,23 @@ pub fn reconcile_stock_update(root: &Path, installation: &Installation, args_aft
     Ok(())
 }
 
+pub fn verify_bootstrap_payload(
+    manifest_path: &Path,
+    signature_path: &Path,
+    payload_path: &Path,
+    stock_path: &Path,
+    target: &str,
+) -> Result<String> {
+    let manifest = fs::read(manifest_path).context("read release manifest")?;
+    let signature = fs::read_to_string(signature_path).context("read release manifest signature")?;
+    let release = ReleaseManifest::parse_verified(&manifest, &signature)?;
+    let stock_version = read_stock_version(stock_path)?;
+    let payload = release.payload_for(&stock_version, target)
+        .with_context(|| format!("no compatible RecentlyDivorced payload for Codex {stock_version} on {target}"))?;
+    verify_payload_file(payload_path, &payload.sha256, &stock_version)?;
+    Ok(payload.identity.clone())
+}
+
 fn read_stock_version(stock: &Path) -> Result<String> {
     let output = Command::new(stock).arg("--version").output().context("read updated stock Codex version")?;
     if !output.status.success() {
@@ -377,17 +409,22 @@ fn download_matching_payload(root: &Path, stock_version: &str, target: &str) -> 
         .with_context(|| format!("no compatible RecentlyDivorced payload for Codex {stock_version} on {target}; keeping last known-good patched Codex"))?;
     let staged = incoming.join(&payload.asset);
     curl_to(&format!("{RELEASE_BASE_URL}/{}", payload.asset), &staged)?;
-    let bytes = fs::read(&staged).context("read downloaded payload")?;
+    verify_payload_file(&staged, &payload.sha256, stock_version)?;
+    Ok((payload.identity.clone(), staged))
+}
+
+fn verify_payload_file(path: &Path, expected_hash: &str, expected_version: &str) -> Result<()> {
+    let bytes = fs::read(path).context("read candidate payload")?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    if format!("{:x}", hasher.finalize()) != payload.sha256 {
-        bail!("downloaded payload hash does not match authenticated release manifest")
+    if format!("{:x}", hasher.finalize()) != expected_hash {
+        bail!("candidate payload hash does not match authenticated release manifest")
     }
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).context("mark downloaded payload executable")?;
-    if read_stock_version(&staged)? != stock_version {
-        bail!("downloaded payload version does not match updated stock Codex")
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).context("mark candidate payload executable")?;
+    if read_stock_version(path)? != expected_version {
+        bail!("candidate payload version does not match stock Codex")
     }
-    Ok((payload.identity.clone(), staged))
+    Ok(())
 }
 
 fn curl_to(url: &str, destination: &Path) -> Result<()> {
@@ -526,6 +563,7 @@ mod tests {
             public_link: PathBuf::from("/tmp/public"),
             stock_link: PathBuf::from("/bin/true"),
             target: "x86_64-unknown-linux-gnu".into(),
+            created_public_link: false,
         };
         run_stock_update(&installation, &[OsString::from("--check")]).unwrap();
     }
@@ -570,7 +608,7 @@ mod tests {
         let root = temp.path().join("rd");
         let stock_path = temp.path().join("stock/codex");
         fs::create_dir_all(stock_path.parent().unwrap()).unwrap(); fs::write(&stock_path, "stock").unwrap();
-        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: temp.path().join("bin/codex"), stock_link: stock_path.clone(), target: "x86_64-unknown-linux-gnu".into() };
+        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: temp.path().join("bin/codex"), stock_link: stock_path.clone(), target: "x86_64-unknown-linux-gnu".into(), created_public_link: false };
         initialize_installation(&root, &installation, StockLink { original_target: stock_path.clone(), dynamic_target: stock_path.clone() }).unwrap();
         assert_eq!(Installation::load(&root).unwrap(), installation);
         assert!(root.join("payloads").is_dir());
@@ -596,7 +634,7 @@ mod tests {
         let stock = temp.path().join("stock/current/codex"); fs::create_dir_all(stock.parent().unwrap()).unwrap(); fs::write(&stock, "stock").unwrap();
         let manager = temp.path().join("rd/manager/current/recentlydivorced"); fs::create_dir_all(manager.parent().unwrap()).unwrap(); fs::write(&manager, "manager").unwrap();
         symlink("../stock/current/codex", &public).unwrap();
-        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: stock, target: "x86_64-unknown-linux-gnu".into() };
+        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: stock, target: "x86_64-unknown-linux-gnu".into(), created_public_link: false };
         repair_public_link(&installation, &manager, &PathBuf::from("../stock/current/codex")).unwrap();
         assert_eq!(fs::read_link(public).unwrap(), manager);
     }
@@ -629,9 +667,31 @@ mod tests {
         let public = temp.path().join("bin/codex"); fs::create_dir_all(public.parent().unwrap()).unwrap();
         let manager = temp.path().join("rd/manager/current/recentlydivorced"); fs::create_dir_all(manager.parent().unwrap()).unwrap(); fs::write(&manager, "manager").unwrap();
         symlink(&manager, &public).unwrap();
-        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: temp.path().join("stock"), target: "x86_64-unknown-linux-gnu".into() };
+        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: temp.path().join("stock"), target: "x86_64-unknown-linux-gnu".into(), created_public_link: false };
         let stock = StockRecord { original_target: PathBuf::from("../stock/current/codex"), dynamic_target: temp.path().join("stock/current/codex"), resolved_target: temp.path().join("stock/releases/one/codex") };
         restore_stock_link(&installation, &manager, &stock).unwrap();
         assert_eq!(fs::read_link(public).unwrap(), stock.original_target);
+    }
+
+    #[test]
+    fn uninstall_removes_an_owned_path_shadow() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("bin/codex");
+        fs::create_dir_all(public.parent().unwrap()).unwrap();
+        let manager = temp.path().join("rd/manager/current/recentlydivorced");
+        fs::create_dir_all(manager.parent().unwrap()).unwrap();
+        fs::write(&manager, "manager").unwrap();
+        symlink(&manager, &public).unwrap();
+        let installation = Installation {
+            schema: 1,
+            installation_id: "test".into(),
+            public_link: public.clone(),
+            stock_link: temp.path().join("stock"),
+            target: "x86_64-unknown-linux-musl".into(),
+            created_public_link: true,
+        };
+        let stock = StockRecord { original_target: PathBuf::from("/stock/codex"), dynamic_target: PathBuf::from("/stock/codex"), resolved_target: PathBuf::from("/stock/codex") };
+        restore_stock_link(&installation, &manager, &stock).unwrap();
+        assert!(!public.exists());
     }
 }
