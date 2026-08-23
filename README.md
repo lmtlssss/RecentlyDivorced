@@ -54,6 +54,17 @@ only non-empty human messages change `preview`. System messages, tool output,
 assistant output, goals, and internal agent traffic do not replace a later human
 ask.
 
+```text
+NOT TOUCHED
+──────────────────────────────────────────────────────────────
+
+model cache        prompt cache        session cache
+plugin cache       auth state          conversation transcript
+tool calls         model selection     token usage
+```
+
+RecentlyDivorced changes the thread-discovery `preview` metadata only.
+
 ## update gate
 
 ```text
