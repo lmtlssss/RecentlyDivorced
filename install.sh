@@ -19,4 +19,5 @@ mkdir -p "$plugin_root/bin"
 curl --fail --silent --show-error --location "https://github.com/$repo/releases/latest/download/$asset" -o "$plugin_root/bin/recentlydivorced"
 chmod 0755 "$plugin_root/bin/recentlydivorced"
 "$plugin_root/bin/recentlydivorced" --trust
+"$plugin_root/bin/recentlydivorced" --backfill
 printf '%s\n' "RecentlyDivorced installed. Use codex normally."

@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::env;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -16,6 +17,10 @@ struct UserPromptSubmit {
 fn main() {
     if env::args().nth(1).as_deref() == Some("--trust") {
         let _ = trust_installed_hook();
+        return;
+    }
+    if env::args().nth(1).as_deref() == Some("--backfill") {
+        backfill_existing_previews();
         return;
     }
     let mut input = String::new();
@@ -148,6 +153,72 @@ fn update_preview(state_db: &PathBuf, session_id: &str, prompt: &str) {
     }
 }
 
+fn backfill_existing_previews() {
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
+    let Some(state_db) = codex_home.map(|home| home.join("state_5.sqlite")) else {
+        return;
+    };
+    backfill_previews(&state_db);
+}
+
+fn backfill_previews(state_db: &PathBuf) {
+    let Ok(connection) = Connection::open(&state_db) else {
+        return;
+    };
+    let Ok(mut statement) = connection.prepare("SELECT id, rollout_path FROM threads") else {
+        return;
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+    }) else {
+        return;
+    };
+    let threads = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    drop(statement);
+    drop(connection);
+    for (session_id, rollout_path) in threads {
+        if let Some(prompt) = latest_user_prompt(&rollout_path) {
+            update_preview(&state_db, &session_id, &prompt);
+        }
+    }
+}
+
+fn latest_user_prompt(path: &PathBuf) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut latest = None;
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(item) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let payload = &item["payload"];
+        if item["type"] != "response_item"
+            || payload["type"] != "message"
+            || payload["role"] != "user"
+        {
+            continue;
+        }
+        let prompt = payload["content"]
+            .as_array()
+            .and_then(|content| {
+                content.iter().find_map(|part| {
+                    (part["type"] == "input_text")
+                        .then(|| part["text"].as_str())
+                        .flatten()
+                })
+            })
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(str::to_owned);
+        if prompt.is_some() {
+            latest = prompt;
+        }
+    }
+    latest
+}
+
 #[cfg(test)]
 mod tests {
     use super::update_preview;
@@ -181,6 +252,56 @@ mod tests {
                 .query_row("SELECT preview FROM threads WHERE id = 'two'", [], |row| row.get::<_, String>(0))
                 .unwrap(),
             "untouched"
+        );
+    }
+
+    #[test]
+    fn reads_the_last_user_prompt_from_a_rollout() {
+        let temp = tempfile::tempdir().unwrap();
+        let rollout = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            [
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":" latest "}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(super::latest_user_prompt(&rollout).as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn backfill_updates_existing_thread_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_db = temp.path().join("state_5.sqlite");
+        let rollout = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"latest"}]}}"#,
+        )
+        .unwrap();
+        let connection = Connection::open(&state_db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, preview TEXT NOT NULL);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES (?1, ?2, 'original')",
+                ("thread-1", rollout.display().to_string()),
+            )
+            .unwrap();
+        drop(connection);
+
+        super::backfill_previews(&state_db);
+
+        let connection = Connection::open(&state_db).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT preview FROM threads WHERE id = 'thread-1'", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "latest"
         );
     }
 }
