@@ -18,4 +18,5 @@ plugin_root="$(printf '%s\n' "$install_json" | sed -n 's/^[[:space:]]*"installed
 mkdir -p "$plugin_root/bin"
 curl --fail --silent --show-error --location "https://github.com/$repo/releases/latest/download/$asset" -o "$plugin_root/bin/recentlydivorced"
 chmod 0755 "$plugin_root/bin/recentlydivorced"
+"$plugin_root/bin/recentlydivorced" --trust
 printf '%s\n' "RecentlyDivorced installed. Use codex normally."
