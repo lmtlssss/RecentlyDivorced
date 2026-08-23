@@ -1,6 +1,0 @@
-RecentlyDivorced applies a narrow, reviewable patch series to the open-source
-OpenAI Codex repository. It is an independent project and is not affiliated
-with or endorsed by OpenAI.
-
-The exact upstream commit and patch boundary are recorded in upstream.lock and
-UPSTREAM.md. Upstream source retains its own license and notices.

@@ -1,6 +1,0 @@
-[Unit]
-Description=Repair RecentlyDivorced Codex ownership after stock update
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/share/recentlydivorced/manager/current/recentlydivorced --rd-repair
