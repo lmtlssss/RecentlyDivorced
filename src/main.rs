@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::env;
+use std::path::PathBuf;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -11,6 +12,14 @@ struct Bootstrap {
     rd_bootstrap_install: bool,
     #[arg(long, hide = true)]
     rd_bootstrap_uninstall: bool,
+    #[arg(long, hide = true)]
+    rd_root: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    rd_public_link: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    rd_target: Option<String>,
+    #[arg(long, hide = true)]
+    rd_installation_id: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -19,8 +28,18 @@ fn main() -> Result<()> {
         return run_codex();
     }
     let bootstrap = Bootstrap::parse();
-    if bootstrap.rd_bootstrap_install || bootstrap.rd_bootstrap_uninstall {
-        anyhow::bail!("bootstrap implementation is not installed yet")
+    if bootstrap.rd_bootstrap_install {
+        let root = bootstrap.rd_root.ok_or_else(|| anyhow::anyhow!("missing bootstrap root"))?;
+        let public_link = bootstrap.rd_public_link.ok_or_else(|| anyhow::anyhow!("missing public codex link"))?;
+        let target = bootstrap.rd_target.ok_or_else(|| anyhow::anyhow!("missing target"))?;
+        let installation_id = bootstrap.rd_installation_id.ok_or_else(|| anyhow::anyhow!("missing installation id"))?;
+        let stock = recentlydivorced::StockLink::capture(&public_link, &root)?;
+        let installation = recentlydivorced::Installation { schema: 1, installation_id, public_link, stock_link: stock.dynamic_target.clone(), target };
+        recentlydivorced::initialize_installation(&root, &installation, stock)?;
+        return Ok(());
+    }
+    if bootstrap.rd_bootstrap_uninstall {
+        anyhow::bail!("bootstrap uninstall implementation is not installed yet")
     }
     anyhow::bail!("RecentlyDivorced is installed through its curl bootstrap; run codex normally")
 }
