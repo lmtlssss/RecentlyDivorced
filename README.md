@@ -1,4 +1,4 @@
-# recentlydivorced
+# RecentlyDivorced
 
 codex resume previews the last human ask.
 
@@ -83,7 +83,7 @@ conversation           title              first prompt
 token usage            tool calls         model selection
 ```
 
-recentlydivorced is a stock codex plugin.
+RecentlyDivorced is a stock Codex plugin.
 codex updates keep the plugin.
 uninstall removes the plugin, marketplace, and hook trust record.
 
