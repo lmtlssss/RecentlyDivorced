@@ -2,8 +2,8 @@ schema = 1
 repo = "https://github.com/openai/codex.git"
 commit = "83d1fe0e67b1323f71febc2925817732b449f1d9"
 stock_version = "0.149.0"
-target = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-linux-musl"
 patches = [
   "a8caf256693434bd56606b392d5f723bad58f7ee4cd74b0f01ce15fded5295d9",
-  "309f06caaace05d7aadc7b61795ba3cb2b7efccfaeea49f91c8d72fb8028fc75",
+  "c9b322515c5bb5ebe32b988628543ae42d5a035b27e3399c0118179a453c50a8",
 ]
