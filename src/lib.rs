@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 pub const INSTALLATION_FILE: &str = "INSTALLATION.toml";
 pub const STOCK_RECORD_FILE: &str = "STOCK.toml";
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, serde::Serialize, Deserialize, PartialEq, Eq)]
 pub struct Installation {
     pub schema: u32,
     pub installation_id: String,
@@ -67,6 +67,16 @@ pub fn write_stock_record(root: &Path, record: &StockRecord) -> Result<()> {
     fs::write(&stage, encoded).context("write stock record stage")?;
     fs::rename(stage, root.join(STOCK_RECORD_FILE)).context("publish stock record")?;
     Ok(())
+}
+
+pub fn initialize_installation(root: &Path, installation: &Installation, stock: StockLink) -> Result<()> {
+    fs::create_dir_all(root.join("payloads")).context("create payload store")?;
+    fs::create_dir_all(root.join("manager")).context("create manager store")?;
+    let marker = toml::to_string(installation).context("encode installation marker")?;
+    let stage = root.join(".INSTALLATION.toml.new");
+    fs::write(&stage, marker).context("write installation marker stage")?;
+    fs::rename(stage, root.join(INSTALLATION_FILE)).context("publish installation marker")?;
+    write_stock_record(root, &stock.into())
 }
 
 impl StockLink {
@@ -330,5 +340,18 @@ mod tests {
         assert!(stock_changed(&record).unwrap());
         record.resolved_target = fs::canonicalize(current.join("codex")).unwrap();
         assert!(!stock_changed(&record).unwrap());
+    }
+
+    #[test]
+    fn bootstrap_writes_only_owned_manager_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rd");
+        let stock_path = temp.path().join("stock/codex");
+        fs::create_dir_all(stock_path.parent().unwrap()).unwrap(); fs::write(&stock_path, "stock").unwrap();
+        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: temp.path().join("bin/codex"), stock_link: stock_path.clone(), target: "x86_64-unknown-linux-gnu".into() };
+        initialize_installation(&root, &installation, StockLink { original_target: stock_path.clone(), dynamic_target: stock_path.clone() }).unwrap();
+        assert_eq!(Installation::load(&root).unwrap(), installation);
+        assert!(root.join("payloads").is_dir());
+        assert!(root.join(STOCK_RECORD_FILE).is_file());
     }
 }
