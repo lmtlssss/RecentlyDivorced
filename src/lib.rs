@@ -207,6 +207,19 @@ pub fn promote_payload(root: &Path, payload_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn publish_codex_payload(root: &Path, source: &Path, identity: &str, target: &str) -> Result<PathBuf> {
+    if !source.is_file() || identity.len() != 64 || target.is_empty() || target.contains('/') {
+        bail!("invalid Codex payload input")
+    }
+    let payload = root.join("payloads").join(identity).join(target);
+    let binary = payload.join("bin/codex");
+    fs::create_dir_all(binary.parent().context("payload binary has no parent")?).context("create payload directory")?;
+    fs::copy(source, &binary).context("copy Codex payload")?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).context("mark Codex payload executable")?;
+    promote_payload(root, &payload)?;
+    Ok(root.join("current/bin/codex"))
+}
+
 pub fn repair_public_link(installation: &Installation, manager: &Path, original_stock_target: &Path) -> Result<()> {
     let existing = fs::read_link(&installation.public_link).context("read public codex link")?;
     if existing != manager && existing != original_stock_target {
@@ -446,5 +459,16 @@ mod tests {
         let published = publish_manager(&root, &source, "0.1.0").unwrap();
         assert!(published.is_file());
         assert_eq!(fs::canonicalize(published).unwrap(), root.join("manager/0.1.0/recentlydivorced"));
+    }
+
+    #[test]
+    fn codex_payload_is_owned_before_promotion() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rd"); fs::create_dir_all(root.join("payloads")).unwrap();
+        let source = temp.path().join("source"); fs::write(&source, "payload").unwrap();
+        let identity = "a".repeat(64);
+        let current = publish_codex_payload(&root, &source, &identity, "x86_64-unknown-linux-gnu").unwrap();
+        assert!(current.is_file());
+        assert!(current.starts_with(&root));
     }
 }
