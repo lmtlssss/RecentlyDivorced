@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::ffi::OsString;
 use std::process::Command;
 use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Component;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -83,6 +84,22 @@ pub fn initialize_installation(root: &Path, installation: &Installation, stock: 
     fs::write(&stage, marker).context("write installation marker stage")?;
     fs::rename(stage, root.join(INSTALLATION_FILE)).context("publish installation marker")?;
     write_stock_record(root, &stock.into())
+}
+
+pub fn publish_manager(root: &Path, source: &Path, version: &str) -> Result<PathBuf> {
+    if version.is_empty() || version.contains('/') || !source.is_file() {
+        bail!("invalid manager payload input")
+    }
+    let manager_root = root.join("manager");
+    let payload = manager_root.join(version);
+    fs::create_dir_all(&payload).context("create manager payload directory")?;
+    let binary = payload.join("recentlydivorced");
+    fs::copy(source, &binary).context("copy manager payload")?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).context("mark manager executable")?;
+    let stage = manager_root.join(".current.new");
+    symlink(version, &stage).context("stage manager pointer")?;
+    fs::rename(stage, manager_root.join("current")).context("publish manager pointer")?;
+    Ok(manager_root.join("current/recentlydivorced"))
 }
 
 impl StockLink {
@@ -418,5 +435,16 @@ mod tests {
         let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: stock, target: "x86_64-unknown-linux-gnu".into() };
         repair_public_link(&installation, &manager, &PathBuf::from("../stock/current/codex")).unwrap();
         assert_eq!(fs::read_link(public).unwrap(), manager);
+    }
+
+    #[test]
+    fn manager_publication_is_versioned_and_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rd");
+        fs::create_dir_all(root.join("manager")).unwrap();
+        let source = temp.path().join("source"); fs::write(&source, "manager").unwrap();
+        let published = publish_manager(&root, &source, "0.1.0").unwrap();
+        assert!(published.is_file());
+        assert_eq!(fs::canonicalize(published).unwrap(), root.join("manager/0.1.0/recentlydivorced"));
     }
 }

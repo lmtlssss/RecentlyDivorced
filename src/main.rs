@@ -37,7 +37,9 @@ fn main() -> Result<()> {
         let installation_id = bootstrap.rd_installation_id.ok_or_else(|| anyhow::anyhow!("missing installation id"))?;
         let stock = recentlydivorced::StockLink::capture(&public_link, &root)?;
         let installation = recentlydivorced::Installation { schema: 1, installation_id, public_link, stock_link: stock.dynamic_target.clone(), target };
-        recentlydivorced::initialize_installation(&root, &installation, stock)?;
+        recentlydivorced::initialize_installation(&root, &installation, stock.clone())?;
+        let manager = recentlydivorced::publish_manager(&root, &env::current_exe()?, env!("CARGO_PKG_VERSION"))?;
+        recentlydivorced::repair_public_link(&installation, &manager, &stock.original_target)?;
         return Ok(());
     }
     if bootstrap.rd_bootstrap_uninstall {
