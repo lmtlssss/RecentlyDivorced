@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::ffi::OsString;
 use std::process::Command;
+use std::os::unix::fs::symlink;
 use std::path::Component;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -160,6 +161,28 @@ pub fn current_payload(root: &Path) -> Result<PathBuf> {
         bail!("current payload is outside the owned payload store")
     }
     Ok(payload)
+}
+
+pub fn promote_payload(root: &Path, payload_dir: &Path) -> Result<()> {
+    let payload_root = fs::canonicalize(root.join("payloads")).context("resolve payload root")?;
+    let payload_dir = fs::canonicalize(payload_dir).context("resolve candidate payload")?;
+    if !payload_dir.starts_with(&payload_root) || !payload_dir.join("bin/codex").is_file() {
+        bail!("candidate payload is not an owned executable")
+    }
+    let current = root.join("current");
+    if let Ok(old) = fs::canonicalize(&current)
+        && old != payload_dir
+        && old.starts_with(&payload_root)
+        && old.join("bin/codex").is_file()
+    {
+        let previous_stage = root.join(".previous.new");
+        symlink(&old, &previous_stage).context("stage previous payload")?;
+        fs::rename(previous_stage, root.join("previous")).context("publish previous payload")?;
+    }
+    let current_stage = root.join(".current.new");
+    symlink(&payload_dir, &current_stage).context("stage current payload")?;
+    fs::rename(current_stage, current).context("publish current payload")?;
+    Ok(())
 }
 
 pub fn dispatch_target(root: &Path, args: &[OsString]) -> Result<PathBuf> {
@@ -353,5 +376,17 @@ mod tests {
         assert_eq!(Installation::load(&root).unwrap(), installation);
         assert!(root.join("payloads").is_dir());
         assert!(root.join(STOCK_RECORD_FILE).is_file());
+    }
+
+    #[test]
+    fn promotion_keeps_last_good_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rd");
+        let first = root.join("payloads/first"); let second = root.join("payloads/second");
+        for payload in [&first, &second] { fs::create_dir_all(payload.join("bin")).unwrap(); fs::write(payload.join("bin/codex"), "payload").unwrap(); }
+        promote_payload(&root, &first).unwrap();
+        promote_payload(&root, &second).unwrap();
+        assert_eq!(fs::canonicalize(root.join("current")).unwrap(), fs::canonicalize(&second).unwrap());
+        assert_eq!(fs::canonicalize(root.join("previous")).unwrap(), fs::canonicalize(&first).unwrap());
     }
 }
