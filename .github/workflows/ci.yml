@@ -1,0 +1,27 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  manager:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+
+  upstream-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: fetch exact upstream pin
+        run: |
+          commit=$(sed -n 's/^commit = "\(.*\)"$/\1/p' upstream.lock)
+          git clone --filter=blob:none https://github.com/openai/codex.git codex
+          git -C codex checkout "$commit"
+      - name: apply reviewed series
+        run: scripts/apply-patch.sh codex
