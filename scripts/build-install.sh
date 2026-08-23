@@ -12,7 +12,7 @@ data = tomllib.load(open(sys.argv[1], 'rb'))
 required = {'schema', 'repo', 'commit', 'stock_version', 'target', 'patches'}
 if set(data) != required or data['schema'] != 1 or not isinstance(data['patches'], list):
     raise SystemExit('invalid RecentlyDivorced upstream.lock')
-for value in (data['repo'], data['commit'], data['target'], *data['patches']):
+for value in (data['repo'], data['commit'], data['stock_version'], data['target'], *data['patches']):
     if not isinstance(value, str) or not value:
         raise SystemExit('invalid RecentlyDivorced lock value')
 print(data['repo']); print(data['commit']); print(data['target']); print(data['stock_version']); print(*data['patches'], sep='\n')
@@ -42,6 +42,7 @@ mapfile -t stock_lines < "$stock_record"
 [[ "$("${stock_lines[1]}" --version | awk '{print $2}')" == "$stock_version" ]] || { echo 'stock Codex version diverges from reviewed lock' >&2; exit 1; }
 
 payload="$root/payloads/$identity/$target"
+mkdir -p "$(dirname "$payload")"
 if [[ ! -x "$payload/bin/codex" ]]; then
   work="$(mktemp -d "$root/.build.XXXXXX")"
   trap 'rm -rf "$work"' EXIT
@@ -53,7 +54,7 @@ if [[ ! -x "$payload/bin/codex" ]]; then
   (cd "$work/codex/codex-rs" && cargo build --release --locked -p codex-cli --target "$target")
   stage="$(mktemp -d "$root/payloads/.stage.XXXXXX")"
   mkdir -p "$stage/bin"; install -m 0755 "$work/codex/codex-rs/target/$target/release/codex" "$stage/bin/codex"
-  "$stage/bin/codex" --version >/dev/null
+  [[ "$("$stage/bin/codex" --version | awk '{print $2}')" == "$stock_version" ]] || { echo 'patched binary version mismatch' >&2; exit 1; }
   (cd "$stage" && sha256sum bin/codex > SHA256SUMS)
   printf 'commit=%s\nidentity=%s\ntarget=%s\n' "$commit" "$identity" "$target" > "$stage/MANIFEST"
   mv -T "$stage" "$payload"
@@ -70,7 +71,7 @@ launcher_stage="$(mktemp "$root/.launcher.XXXXXX")"
 cat > "$launcher_stage" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-root="${XDG_DATA_HOME:-$HOME/.local/share}/recentlydivorced"
+root='__RECENTLYDIVORCED_ROOT__'
 if [[ "${1:-}" == "--recentlydivorced-stock" ]]; then
   shift
   mapfile -t stock < "$root/stock-codex.path"
@@ -79,6 +80,7 @@ if [[ "${1:-}" == "--recentlydivorced-stock" ]]; then
 fi
 exec "$root/current/bin/codex" "$@"
 EOF
+sed -i "s|__RECENTLYDIVORCED_ROOT__|$root|" "$launcher_stage"
 chmod 0755 "$launcher_stage"; mv -Tf "$launcher_stage" "$launcher"
 ln -sfn "$launcher" "$HOME/.local/bin/.codex-recentlydivorced.new"
 mv -Tf "$HOME/.local/bin/.codex-recentlydivorced.new" "$stock_link"
