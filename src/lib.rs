@@ -46,12 +46,19 @@ pub struct StockLink {
 pub struct StockRecord {
     pub original_target: PathBuf,
     pub dynamic_target: PathBuf,
+    pub resolved_target: PathBuf,
 }
 
 impl From<StockLink> for StockRecord {
     fn from(value: StockLink) -> Self {
-        Self { original_target: value.original_target, dynamic_target: value.dynamic_target }
+        let resolved_target = fs::canonicalize(&value.dynamic_target).unwrap_or_default();
+        Self { original_target: value.original_target, dynamic_target: value.dynamic_target, resolved_target }
     }
+}
+
+pub fn stock_changed(record: &StockRecord) -> Result<bool> {
+    let current = fs::canonicalize(&record.dynamic_target).context("resolve dynamic stock target")?;
+    Ok(current != record.resolved_target)
 }
 
 pub fn write_stock_record(root: &Path, record: &StockRecord) -> Result<()> {
@@ -298,9 +305,30 @@ mod tests {
         let record = StockRecord {
             original_target: PathBuf::from("../stock/current/codex"),
             dynamic_target: temp.path().join("stock/current/codex"),
+            resolved_target: temp.path().join("stock/releases/0.1/codex"),
         };
         write_stock_record(temp.path(), &record).unwrap();
         let decoded: StockRecord = toml::from_str(&fs::read_to_string(temp.path().join(STOCK_RECORD_FILE)).unwrap()).unwrap();
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn stock_change_detects_nested_current_move() {
+        let temp = tempfile::tempdir().unwrap();
+        let release = temp.path().join("releases/0.1/codex");
+        fs::create_dir_all(release.parent().unwrap()).unwrap();
+        fs::write(&release, "stock").unwrap();
+        let current = temp.path().join("current");
+        symlink("releases/0.1", &current).unwrap();
+        let mut record = StockRecord {
+            original_target: PathBuf::from("current/codex"), dynamic_target: current.join("codex"), resolved_target: fs::canonicalize(current.join("codex")).unwrap(),
+        };
+        assert!(!stock_changed(&record).unwrap());
+        let next = temp.path().join("releases/0.2/codex");
+        fs::create_dir_all(next.parent().unwrap()).unwrap(); fs::write(&next, "stock").unwrap();
+        fs::remove_file(&current).unwrap(); symlink("releases/0.2", &current).unwrap();
+        assert!(stock_changed(&record).unwrap());
+        record.resolved_target = fs::canonicalize(current.join("codex")).unwrap();
+        assert!(!stock_changed(&record).unwrap());
     }
 }
