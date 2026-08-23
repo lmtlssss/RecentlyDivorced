@@ -1,4 +1,4 @@
-name: release
+name: release-plugin
 
 on:
   workflow_dispatch:
@@ -17,26 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: fetch and patch exact Codex upstream
-        run: |
-          commit=$(sed -n 's/^commit = "\(.*\)"$/\1/p' upstream.lock)
-          git clone --filter=blob:none https://github.com/openai/codex.git codex
-          git -C codex checkout "$commit"
-          scripts/apply-patch.sh codex
-      - name: build manager
-        run: cargo build --release --locked
-      - name: build patched Codex
-        working-directory: codex/codex-rs
-        run: cargo build --release --locked -p codex-cli
-      - name: package signed release
-        env:
-          RECENTLYDIVORCED_SIGNING_KEY: ${{ runner.temp }}/recentlydivorced-ed25519.pem
-          SIGNING_KEY: ${{ secrets.RECENTLYDIVORCED_ED25519_PRIVATE_KEY }}
-        run: |
-          printf '%s' "$SIGNING_KEY" > "$RECENTLYDIVORCED_SIGNING_KEY"
-          chmod 600 "$RECENTLYDIVORCED_SIGNING_KEY"
-          scripts/package-release.sh "${{ inputs.tag }}" target/release/recentlydivorced codex/codex-rs/target/release/codex release
-      - name: publish GitHub release
+      - name: build hook helper
+        run: cargo build --release --locked --manifest-path plugins/recentlydivorced/runtime/Cargo.toml
+      - name: publish helper
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ inputs.tag }}" release/* --title "${{ inputs.tag }}" --generate-notes
+        run: |
+          install -m 0755 plugins/recentlydivorced/runtime/target/release/recentlydivorced recentlydivorced-x86_64-unknown-linux-gnu
+          gh release create "${{ inputs.tag }}" recentlydivorced-x86_64-unknown-linux-gnu --title "${{ inputs.tag }}" --generate-notes

@@ -1,7 +1,7 @@
 # RecentlyDivorced
 
-Codex `/resume` should orient you with the last thing you asked, not the prompt
-that started a twenty-day-long thread.
+Codex `/resume` should show the last thing you asked, not the prompt that
+started the thread.
 
 > bro nobody with adhd remembers wtf is what that way
 
@@ -10,9 +10,8 @@ first prompt  -> provenance and title
 latest prompt -> /resume preview
 ```
 
-RecentlyDivorced is a Linux CLI-only Codex patch and release manager. It changes
-only thread preview metadata. It does not rewrite transcripts or touch model,
-prompt, session, plugin, auth, or token caches.
+RecentlyDivorced is a small stock-Codex plugin. It does not replace, fork, wrap,
+or rebuild Codex.
 
 ## install
 
@@ -20,7 +19,8 @@ prompt, session, plugin, auth, or token caches.
 curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/install.sh | bash
 ```
 
-Then use `codex` normally. There are no wrapper commands to remember.
+Then use `codex` exactly as normal. Codex owns the plugin installation and
+keeps it when Codex updates.
 
 ## uninstall
 
@@ -28,67 +28,34 @@ Then use `codex` normally. There are no wrapper commands to remember.
 curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/uninstall.sh | bash
 ```
 
-That returns the public `codex` path to its exact stock target (or removes the
-PATH shadow created by the installer). Codex history and caches stay untouched.
+That removes the plugin and its marketplace. Stock Codex was never modified.
 
-## what happens
+## the whole primitive
 
 ```text
-curl install
-  -> discover stock Codex
-  -> download a signed, exact-version payload
-  -> verify signature, hash, and codex --version
-  -> atomically claim the public codex link
-
-normal codex
-  -> local marker/current lookup
-  -> exec patched Codex with the original argv/env/fds
-
-codex update
-  -> run stock update under one lock
-  -> fetch only an exact signed payload for that stock version + target
-  -> verify and atomically promote it
+Codex UserPromptSubmit hook
+  -> session_id + submitted human prompt
+  -> UPDATE threads SET preview = prompt WHERE id = session_id
+  -> /resume shows the last prompt
 ```
 
-Normal `codex` invocations make no network request and do not modify Codex
-state. If no matching release exists after an upstream update, the update exits
-nonzero and keeps the last known-good patched payload; it never lies that the
-active patched Codex updated.
+The hook is asynchronous. It does not block a prompt, scan transcripts, change
+the conversation, alter a title, change model or prompt caches, touch auth, or
+adjust token use. Its only write is the existing thread `preview` metadata
+field that `/resume` already reads.
+
+## why this survives updates
+
+RecentlyDivorced uses Codex’s public plugin marketplace and lifecycle-hook
+system. The helper is a tiny Rust binary downloaded by the curl installer; the
+Codex executable stays stock. Updates preserve the configured plugin, so the
+same hook continues to run.
 
 ## scope
 
-- Linux CLI, x86_64 only for the first release.
-- x86_64 GNU/Linux payloads; no systemd requirement.
-- Systemd may later be offered only as optional protection against external
-  stock-link drift. `codex update` is the portable core.
-- macOS, Windows, and the desktop app are deliberately out of scope.
+- Linux CLI, x86_64 GNU/Linux.
+- Normal Codex plugin install and removal.
+- No macOS, Windows, or desktop app surface.
 
-## upstream patch
-
-The patch is pinned in [upstream.lock](upstream.lock). It updates the stored
-`preview` only when a non-empty human message arrives. The initial human message
-and title behavior remain intact.
-
-The legacy transcript fallback stays bounded. RecentlyDivorced does not turn
-`/resume` into a full scan of every old conversation just to chase a prettier
-row.
-
-## release boundary
-
-Each release contains an authenticated manifest, detached Ed25519 signature,
-manager binary, and patched Codex payload. The embedded public key verifies the
-manifest before installation or promotion. Payloads must match:
-
-```text
-stock Codex version + Linux target + SHA-256
-```
-
-Build and test the exact upstream pin before publishing any new payload:
-
-```bash
-scripts/apply-patch.sh codex
-scripts/verify.sh codex
-```
-
-See [UPSTREAM.md](UPSTREAM.md) for the source boundary and [NOTICE](NOTICE) for
-upstream attribution.
+The upstream clone in `references/` was used to verify the hook contract and
+the stock SQLite schema. It is not a forked runtime.

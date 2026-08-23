@@ -1,0 +1,18 @@
+{
+  "name": "recentlydivorced",
+  "version": "0.1.0",
+  "description": "Show the latest human prompt in Codex resume previews.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "RecentlyDivorced",
+    "shortDescription": "Keep resume previews on the latest human prompt.",
+    "longDescription": "A stock-Codex UserPromptSubmit plugin that updates only the active thread preview.",
+    "developerName": "RecentlyDivorced",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Use Codex normally; RecentlyDivorced updates resume previews automatically."
+  }
+}
