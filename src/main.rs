@@ -51,7 +51,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if bootstrap.rd_bootstrap_uninstall {
-        anyhow::bail!("bootstrap uninstall implementation is not installed yet")
+        let manager = env::current_exe()?;
+        let root = recentlydivorced::InstallRoot::from_manager_path(&manager)?;
+        let installation = recentlydivorced::Installation::load(&root.root)?;
+        let stock = recentlydivorced::load_stock_record(&root.root)?;
+        recentlydivorced::restore_stock_link(&installation, &manager, &stock)?;
+        return Ok(());
     }
     if bootstrap.rd_repair {
         let manager = env::current_exe()?;

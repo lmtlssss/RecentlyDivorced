@@ -222,7 +222,7 @@ pub fn publish_codex_payload(root: &Path, source: &Path, identity: &str, target:
 
 pub fn repair_public_link(installation: &Installation, manager: &Path, original_stock_target: &Path) -> Result<()> {
     let existing = fs::read_link(&installation.public_link).context("read public codex link")?;
-    if existing != manager && existing != original_stock_target {
+    if existing != original_stock_target && !same_target(&installation.public_link, manager) {
         bail!("public codex link is owned by another target")
     }
     let parent = installation.public_link.parent().context("public link has no parent")?;
@@ -230,6 +230,22 @@ pub fn repair_public_link(installation: &Installation, manager: &Path, original_
     symlink(manager, &stage).context("stage public manager link")?;
     fs::rename(stage, &installation.public_link).context("publish public manager link")?;
     Ok(())
+}
+
+pub fn restore_stock_link(installation: &Installation, manager: &Path, stock: &StockRecord) -> Result<()> {
+    fs::read_link(&installation.public_link).context("read public codex link")?;
+    if !same_target(&installation.public_link, manager) {
+        bail!("public codex link is no longer RecentlyDivorced-owned")
+    }
+    let parent = installation.public_link.parent().context("public link has no parent")?;
+    let stage = parent.join(".codex-stock.new");
+    symlink(&stock.original_target, &stage).context("stage stock link restore")?;
+    fs::rename(stage, &installation.public_link).context("restore stock codex link")?;
+    Ok(())
+}
+
+fn same_target(link: &Path, target: &Path) -> bool {
+    fs::canonicalize(link).ok() == fs::canonicalize(target).ok()
 }
 
 pub fn dispatch_target(root: &Path, args: &[OsString]) -> Result<PathBuf> {
@@ -470,5 +486,17 @@ mod tests {
         let current = publish_codex_payload(&root, &source, &identity, "x86_64-unknown-linux-gnu").unwrap();
         assert!(current.is_file());
         assert!(current.starts_with(&root));
+    }
+
+    #[test]
+    fn uninstall_restores_only_owned_public_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("bin/codex"); fs::create_dir_all(public.parent().unwrap()).unwrap();
+        let manager = temp.path().join("rd/manager/current/recentlydivorced"); fs::create_dir_all(manager.parent().unwrap()).unwrap(); fs::write(&manager, "manager").unwrap();
+        symlink(&manager, &public).unwrap();
+        let installation = Installation { schema: 1, installation_id: "test".into(), public_link: public.clone(), stock_link: temp.path().join("stock"), target: "x86_64-unknown-linux-gnu".into() };
+        let stock = StockRecord { original_target: PathBuf::from("../stock/current/codex"), dynamic_target: temp.path().join("stock/current/codex"), resolved_target: temp.path().join("stock/releases/one/codex") };
+        restore_stock_link(&installation, &manager, &stock).unwrap();
+        assert_eq!(fs::read_link(public).unwrap(), stock.original_target);
     }
 }
