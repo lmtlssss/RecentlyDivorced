@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::ffi::OsString;
+use std::process::Command;
 use std::path::Component;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -131,6 +132,18 @@ pub fn dispatch_target(root: &Path, args: &[OsString]) -> Result<PathBuf> {
     current_payload(root)
 }
 
+pub fn run_stock_update(installation: &Installation, args_after_update: &[OsString]) -> Result<()> {
+    let status = Command::new(&installation.stock_link)
+        .arg("update")
+        .args(args_after_update)
+        .status()
+        .context("run stock codex update")?;
+    if !status.success() {
+        bail!("stock codex update failed: {status}")
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRoot {
     pub root: PathBuf,
@@ -244,5 +257,17 @@ mod tests {
         ).unwrap();
         assert_eq!(dispatch_target(&root, &[OsString::from("exec")]).unwrap(), payload);
         assert!(dispatch_target(&root, &[OsString::from("update")]).is_err());
+    }
+
+    #[test]
+    fn stock_update_runs_only_recorded_stock_binary() {
+        let installation = Installation {
+            schema: 1,
+            installation_id: "test".into(),
+            public_link: PathBuf::from("/tmp/public"),
+            stock_link: PathBuf::from("/bin/true"),
+            target: "x86_64-unknown-linux-gnu".into(),
+        };
+        run_stock_update(&installation, &[OsString::from("--check")]).unwrap();
     }
 }
