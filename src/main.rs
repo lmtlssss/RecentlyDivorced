@@ -84,6 +84,7 @@ fn main() -> Result<()> {
 }
 
 fn run_codex() -> Result<()> {
+    let argv0 = env::args_os().next().unwrap_or_default();
     let manager = env::current_exe()?;
     let root = recentlydivorced::InstallRoot::from_manager_path(&manager)?;
     let args: Vec<_> = env::args_os().skip(1).collect();
@@ -95,5 +96,5 @@ fn run_codex() -> Result<()> {
         return Ok(());
     }
     let payload = recentlydivorced::dispatch_target(&root.root, &args)?;
-    Err(Command::new(payload).args(args).exec().into())
+    Err(Command::new(payload).arg0(argv0).args(args).exec().into())
 }
