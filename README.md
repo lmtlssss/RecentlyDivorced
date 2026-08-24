@@ -1,6 +1,6 @@
 # RecentlyDivorced
 
-codex resume previews the last human ask.
+shows the most recent prompt in `/resume`.
 
 ```text
 RECENTLYDIVORCED
@@ -31,31 +31,14 @@ sh install.sh
 curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/uninstall.sh | sh
 ```
 
-## what it does
+## behavior
 
-Codex runs the plugin after each submitted user prompt. The plugin updates that
-thread's `preview` value with the submitted prompt. `/resume` reads
-`preview`, so it shows the latest prompt instead of the original thread
-prompt.
+install backfills existing thread previews from their last user prompt.
 
-It does not modify the Codex executable, transcript, title, first prompt,
-model settings, caches, auth, tool calls, or token use.
-
-## existing threads
-
-install reads each existing thread rollout once and sets its preview to the
-last user prompt. New prompts use the hook.
+new prompts update the active thread preview through the Codex hook.
 
 Codex updates keep the installed plugin. Uninstall removes the plugin,
 marketplace, and hook trust record.
-
-## release files
-
-```text
-file                                            use
-──────────────────────────────────────────────────────────────
-recentlydivorced-x86_64-unknown-linux-gnu      hook helper
-```
 
 ## build
 
