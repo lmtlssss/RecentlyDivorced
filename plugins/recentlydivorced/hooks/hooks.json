@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/bin/recentlydivorced",
+            "command": "${PLUGIN_DATA}/recentlydivorced",
             "timeout": 2,
             "async": true,
             "statusMessage": "Updating resume preview"
