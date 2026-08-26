@@ -33,8 +33,6 @@ curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/unin
 
 ## behavior
 
-install backfills existing thread previews from their last user prompt.
-
 new prompts update the active thread preview through the Codex hook.
 
 Codex updates keep the installed plugin. Uninstall removes the plugin,

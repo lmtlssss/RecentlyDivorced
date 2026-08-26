@@ -22,5 +22,4 @@ mkdir -p "$plugin_data"
 curl --fail --silent --show-error --location "https://github.com/$repo/releases/latest/download/$asset" -o "$plugin_data/recentlydivorced"
 chmod 0755 "$plugin_data/recentlydivorced"
 "$plugin_data/recentlydivorced" --trust
-"$plugin_data/recentlydivorced" --backfill
 printf '%s\n' "RecentlyDivorced installed. Use codex normally."
