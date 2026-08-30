@@ -298,7 +298,7 @@ fn run_model_resilient(
 
 fn batches(model: &str, jobs: Vec<Job>) -> Vec<Vec<Job>> {
     let (max_threads, max_chars) = if model == INITIAL_MODEL {
-        (20, 28_000)
+        (100, 120_000)
     } else {
         (6, 9_000)
     };
