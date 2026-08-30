@@ -22,4 +22,10 @@ mkdir -p "$plugin_data"
 curl --fail --silent --show-error --location "https://github.com/$repo/releases/latest/download/$asset" -o "$plugin_data/recentlydivorced"
 chmod 0755 "$plugin_data/recentlydivorced"
 "$plugin_data/recentlydivorced" --trust
+estimate="$(PLUGIN_DATA="$plugin_data" "$plugin_data/recentlydivorced" --estimate)"
+printf '%s\n' "Archive: $estimate. The first uncached pass uses gpt-5.6-sol at low reasoning."
+printf '%s\n' "This consumes Codex usage. Later launches use gpt-5.3-codex-spark only for changed conversations."
+if ! PLUGIN_DATA="$plugin_data" "$plugin_data/recentlydivorced" --catch-up; then
+  printf '%s\n' "Archive catch-up paused; the next Codex launch will retry it." >&2
+fi
 printf '%s\n' "RecentlyDivorced installed. Use codex normally."

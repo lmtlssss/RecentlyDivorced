@@ -1,18 +1,18 @@
 {
   "name": "recentlydivorced",
-  "version": "0.1.3",
-  "description": "Show the latest human prompt in Codex resume previews.",
+  "version": "0.2.0",
+  "description": "Label Codex resume rows with short conversation summaries.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "RecentlyDivorced",
-    "shortDescription": "Keep resume previews on the latest human prompt.",
-    "longDescription": "A stock-Codex UserPromptSubmit plugin that updates only the active thread preview.",
+    "shortDescription": "Label resume rows with conversation summaries.",
+    "longDescription": "Uses Codex models to keep each resume row short and recognizable.",
     "developerName": "RecentlyDivorced",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Use Codex normally; RecentlyDivorced updates resume previews automatically."
+    "defaultPrompt": "Use Codex normally; RecentlyDivorced labels resume rows automatically."
   }
 }
