@@ -63,7 +63,10 @@ fn trust_installed_hook() -> Result<(), Box<dyn std::error::Error>> {
             "params": { "clientInfo": { "name": "recentlydivorced-installer", "version": "0.1.0" } }
         }),
     )?;
-    write_jsonrpc(&mut stdin, serde_json::json!({ "method": "initialized", "params": {} }))?;
+    write_jsonrpc(
+        &mut stdin,
+        serde_json::json!({ "method": "initialized", "params": {} }),
+    )?;
     read_response(&mut stdout, 1)?;
 
     write_jsonrpc(
@@ -77,7 +80,11 @@ fn trust_installed_hook() -> Result<(), Box<dyn std::error::Error>> {
     let hooks = read_response(&mut stdout, 2)?;
     let hook = hooks["result"]["data"][0]["hooks"]
         .as_array()
-        .and_then(|hooks| hooks.iter().find(|hook| hook["pluginId"] == "recentlydivorced@recentlydivorced"))
+        .and_then(|hooks| {
+            hooks
+                .iter()
+                .find(|hook| hook["pluginId"] == "recentlydivorced@recentlydivorced")
+        })
         .ok_or("RecentlyDivorced hook was not discovered by stock Codex")?;
     let key = hook["key"].as_str().ok_or("missing hook key")?;
     let trusted_hash = hook["currentHash"].as_str().ok_or("missing hook hash")?;
@@ -137,15 +144,41 @@ fn update_preview(state_db: &PathBuf, session_id: &str, prompt: &str) {
     if !state_db.exists() {
         return;
     }
-    for _ in 0..5 {
+    // Codex persists the thread and may finish its own preview write just after
+    // dispatching this hook. Keep this bounded to the hook timeout.
+    thread::sleep(Duration::from_millis(40));
+    for _ in 0..28 {
         if let Ok(connection) = Connection::open(&state_db) {
             let _ = connection.busy_timeout(Duration::from_millis(20));
             match connection.execute(
                 "UPDATE threads SET preview = ?1 WHERE id = ?2",
                 (prompt, session_id),
             ) {
-                Ok(_) => return,
-                Err(_) => {}
+                Ok(rows) if rows > 0 => {
+                    let confirmed = connection
+                        .query_row(
+                            "SELECT preview FROM threads WHERE id = ?1",
+                            [session_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map(|preview| preview == prompt)
+                        .unwrap_or(false);
+                    if confirmed {
+                        thread::sleep(Duration::from_millis(35));
+                        let settled = connection
+                            .query_row(
+                                "SELECT preview FROM threads WHERE id = ?1",
+                                [session_id],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .map(|preview| preview == prompt)
+                            .unwrap_or(false);
+                        if settled {
+                            return;
+                        }
+                    }
+                }
+                Ok(_) | Err(_) => {}
             }
         }
         thread::sleep(Duration::from_millis(20));
@@ -170,7 +203,10 @@ fn backfill_previews(state_db: &PathBuf) {
         return;
     };
     let Ok(rows) = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+        Ok((
+            row.get::<_, String>(0)?,
+            PathBuf::from(row.get::<_, String>(1)?),
+        ))
     }) else {
         return;
     };
@@ -222,6 +258,8 @@ fn latest_user_prompt(path: &PathBuf) -> Option<String> {
 mod tests {
     use super::update_preview;
     use rusqlite::Connection;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn updates_only_the_target_thread_preview() {
@@ -242,13 +280,17 @@ mod tests {
         let connection = Connection::open(&state_db).unwrap();
         assert_eq!(
             connection
-                .query_row("SELECT preview FROM threads WHERE id = 'one'", [], |row| row.get::<_, String>(0))
+                .query_row("SELECT preview FROM threads WHERE id = 'one'", [], |row| {
+                    row.get::<_, String>(0)
+                })
                 .unwrap(),
             "latest ask"
         );
         assert_eq!(
             connection
-                .query_row("SELECT preview FROM threads WHERE id = 'two'", [], |row| row.get::<_, String>(0))
+                .query_row("SELECT preview FROM threads WHERE id = 'two'", [], |row| {
+                    row.get::<_, String>(0)
+                })
                 .unwrap(),
             "untouched"
         );
@@ -269,9 +311,73 @@ mod tests {
         let connection = Connection::open(&state_db).unwrap();
         assert_eq!(
             connection
-                .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM threads", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn waits_for_thread_row_created_after_hook_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_db = temp.path().join("state_5.sqlite");
+        Connection::open(&state_db)
+            .unwrap()
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, preview TEXT NOT NULL);")
+            .unwrap();
+        let db_for_insert = state_db.clone();
+        let inserter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(70));
+            Connection::open(db_for_insert)
+                .unwrap()
+                .execute("INSERT INTO threads VALUES ('late', 'stock')", [])
+                .unwrap();
+        });
+
+        update_preview(&state_db, "late", "latest ask");
+        inserter.join().unwrap();
+        assert_eq!(
+            Connection::open(&state_db)
+                .unwrap()
+                .query_row("SELECT preview FROM threads WHERE id = 'late'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "latest ask"
+        );
+    }
+
+    #[test]
+    fn repairs_preview_overwritten_during_settle_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_db = temp.path().join("state_5.sqlite");
+        Connection::open(&state_db)
+            .unwrap()
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, preview TEXT NOT NULL); INSERT INTO threads VALUES ('race', 'stock');")
+            .unwrap();
+        let db_for_overwrite = state_db.clone();
+        let overwriter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(65));
+            Connection::open(db_for_overwrite)
+                .unwrap()
+                .execute(
+                    "UPDATE threads SET preview = 'codex overwrite' WHERE id = 'race'",
+                    [],
+                )
+                .unwrap();
+        });
+
+        update_preview(&state_db, "race", "latest ask");
+        overwriter.join().unwrap();
+        assert_eq!(
+            Connection::open(&state_db)
+                .unwrap()
+                .query_row("SELECT preview FROM threads WHERE id = 'race'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "latest ask"
         );
     }
 
@@ -289,7 +395,10 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        assert_eq!(super::latest_user_prompt(&rollout).as_deref(), Some("latest"));
+        assert_eq!(
+            super::latest_user_prompt(&rollout).as_deref(),
+            Some("latest")
+        );
     }
 
     #[test]
@@ -319,7 +428,11 @@ mod tests {
         let connection = Connection::open(&state_db).unwrap();
         assert_eq!(
             connection
-                .query_row("SELECT preview FROM threads WHERE id = 'thread-1'", [], |row| row.get::<_, String>(0))
+                .query_row(
+                    "SELECT preview FROM threads WHERE id = 'thread-1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
                 .unwrap(),
             "latest"
         );

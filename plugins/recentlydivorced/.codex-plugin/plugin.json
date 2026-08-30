@@ -1,6 +1,6 @@
 {
   "name": "recentlydivorced",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Show the latest human prompt in Codex resume previews.",
   "author": {
     "name": "Local developer"
