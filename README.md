@@ -27,13 +27,16 @@ sh install.sh
 
 ## usage
 
-the first install labels the available archive with `gpt-5.6-sol` at low
-reasoning. later Codex launches use `gpt-5.3-codex-spark` only for
-conversations whose transcript changed.
+the curl installer automatically crawls every available rollout and labels it
+with `gpt-5.6-sol` at low reasoning. later Codex launches automatically use
+`gpt-5.3-codex-spark` only for rollouts whose file fingerprint changed.
 
-the first pass batches up to 100 conversations. Spark refreshes batch up to six.
-each conversation sends a bounded capsule: its first ask, prior label, and
-recent turns. labels are at most 12 words.
+the first pass batches up to 100 conversations, then permanently marks the
+bootstrap complete. after that, every new or changed conversation uses Spark
+in batches up to six. Sol is not used for maintenance.
+
+each conversation sends at most 480 characters: its first ask, prior label,
+and latest three semantic turns. labels are at most 12 words.
 
 this consumes Codex model usage. the first pass scales with archive size;
 later usage scales with changed conversations. conversation excerpts are sent

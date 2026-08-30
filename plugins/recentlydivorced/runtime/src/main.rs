@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const INITIAL_MODEL: &str = "gpt-5.6-sol";
 const UPDATE_MODEL: &str = "gpt-5.3-codex-spark";
-const CAPSULE_CHARS: usize = 1_200;
-const TAIL_BYTES: u64 = 262_144;
+const CAPSULE_CHARS: usize = 480;
+const TAIL_BYTES: u64 = 65_536;
 const LOCK_TTL_SECONDS: i64 = 21_600;
 
 #[derive(Clone)]
@@ -81,8 +81,28 @@ fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
             name TEXT PRIMARY KEY,
             owner TEXT NOT NULL,
             acquired_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
          );",
     )?;
+    let generation = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'capsule_generation'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if generation.as_deref() != Some("rollout-tail-v1") {
+        connection.execute("DELETE FROM summaries", [])?;
+        connection.execute("DELETE FROM meta WHERE key = 'bootstrap_complete'", [])?;
+        connection.execute(
+            "INSERT INTO meta VALUES ('capsule_generation', 'rollout-tail-v1')
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [],
+        )?;
+    }
     Ok(connection)
 }
 
@@ -93,7 +113,22 @@ fn run_labels(verbose: bool) -> Result<(), Box<dyn Error>> {
     if !acquire_lock(&cache, &owner)? {
         return Ok(());
     }
-    let result = run_labels_locked(&state_path, &plugin_data, &cache, verbose);
+    let bootstrap = cache
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'bootstrap_complete'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_none();
+    let result = run_labels_locked(&state_path, &plugin_data, &cache, verbose, bootstrap);
+    if result.is_ok() && bootstrap {
+        cache.execute(
+            "INSERT INTO meta VALUES ('bootstrap_complete', '1')
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [],
+        )?;
+    }
     let _ = cache.execute(
         "DELETE FROM locks WHERE name = 'refresh' AND owner = ?1",
         [&owner],
@@ -118,6 +153,7 @@ fn run_labels_locked(
     plugin_data: &Path,
     cache: &Connection,
     verbose: bool,
+    bootstrap: bool,
 ) -> Result<(), Box<dyn Error>> {
     let state = Connection::open(state_path)?;
     state.busy_timeout(std::time::Duration::from_secs(10))?;
@@ -169,13 +205,7 @@ fn run_labels_locked(
                 continue;
             }
         }
-        let prior = cached.as_ref().map(|cached| cached.3.clone());
-        let capsule = if prior.is_some() {
-            conversation_capsule(&path, &first_user_message, &preview)
-        } else {
-            index_capsule(&first_user_message, &preview)
-        };
-        let Some(capsule) = capsule else {
+        let Some(capsule) = conversation_capsule(&path, &first_user_message, &preview) else {
             continue;
         };
         let job = Job {
@@ -185,9 +215,9 @@ fn run_labels_locked(
             inode: fingerprint.1,
             length: fingerprint.2,
             capsule,
-            prior,
+            prior: cached.map(|cached| cached.3),
         };
-        if job.prior.is_some() {
+        if job.prior.is_some() || !bootstrap {
             changed.push(job);
         } else {
             initial.push(job);
@@ -298,7 +328,7 @@ fn run_model_resilient(
 
 fn batches(model: &str, jobs: Vec<Job>) -> Vec<Vec<Job>> {
     let (max_threads, max_chars) = if model == INITIAL_MODEL {
-        (100, 120_000)
+        (100, 60_000)
     } else {
         (6, 9_000)
     };
@@ -472,48 +502,29 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
             .filter_map(|part| part["text"].as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let text = compact_text(&text, 420);
+        let text = compact_text(&text, 180);
         if text.is_empty() || (role == "user" && synthetic_prompt(&text)) {
             continue;
         }
         tail.push_back(format!("{role}: {text}"));
-        if tail.len() > 8 {
+        if tail.len() > 3 {
             tail.pop_front();
         }
     }
     let mut capsule = String::new();
-    let first = compact_text(first_user, 420);
+    let first = compact_text(first_user, 180);
     if !first.is_empty() && !synthetic_prompt(&first) {
         capsule.push_str("goal: ");
         capsule.push_str(&first);
         capsule.push('\n');
     }
-    let preview = compact_text(preview, 280);
+    let preview = compact_text(preview, 120);
     if !preview.is_empty() && preview != first {
         capsule.push_str("previous index: ");
         capsule.push_str(&preview);
         capsule.push('\n');
     }
     capsule.push_str(&tail.into_iter().collect::<Vec<_>>().join("\n"));
-    let capsule = compact_text(&capsule, CAPSULE_CHARS);
-    (!capsule.is_empty()).then_some(capsule)
-}
-
-fn index_capsule(first_user: &str, preview: &str) -> Option<String> {
-    let first = compact_text(first_user, 700);
-    let preview = compact_text(preview, 500);
-    let mut capsule = String::new();
-    if !first.is_empty() && !synthetic_prompt(&first) {
-        capsule.push_str("goal: ");
-        capsule.push_str(&first);
-    }
-    if !preview.is_empty() && preview != first && !synthetic_prompt(&preview) {
-        if !capsule.is_empty() {
-            capsule.push('\n');
-        }
-        capsule.push_str("current index: ");
-        capsule.push_str(&preview);
-    }
     let capsule = compact_text(&capsule, CAPSULE_CHARS);
     (!capsule.is_empty()).then_some(capsule)
 }
@@ -678,8 +689,8 @@ fn unix_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPSULE_CHARS, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule, index_capsule,
-        normalize_label, run_model,
+        CAPSULE_CHARS, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule, normalize_label,
+        run_model,
     };
 
     #[test]
@@ -702,10 +713,6 @@ mod tests {
         assert!(capsule.contains("user: fix the sole lighting"));
         assert!(!capsule.contains("AGENTS"));
         assert!(capsule.chars().count() <= CAPSULE_CHARS);
-        assert_eq!(
-            index_capsule("build a boot visualizer", "fix the sole lighting").unwrap(),
-            "goal: build a boot visualizer current index: fix the sole lighting"
-        );
     }
 
     #[test]
