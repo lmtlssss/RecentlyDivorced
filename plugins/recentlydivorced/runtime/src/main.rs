@@ -13,8 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const INITIAL_MODEL: &str = "gpt-5.6-sol";
 const UPDATE_MODEL: &str = "gpt-5.3-codex-spark";
 const CAPSULE_CHARS: usize = 1_200;
-const BATCH_CHARS: usize = 14_000;
-const BATCH_THREADS: usize = 10;
 const TAIL_BYTES: u64 = 262_144;
 const LOCK_TTL_SECONDS: i64 = 21_600;
 
@@ -233,7 +231,7 @@ fn process_jobs(
 ) -> Result<(), Box<dyn Error>> {
     let total = jobs.len();
     let mut done = 0;
-    for (batch_number, batch) in batches(jobs).into_iter().enumerate() {
+    for (batch_number, batch) in batches(model, jobs).into_iter().enumerate() {
         match run_model(model, &batch, plugin_data, batch_number) {
             Ok(labels) => {
                 let state = Connection::open(state_path)?;
@@ -275,13 +273,18 @@ fn process_jobs(
     Ok(())
 }
 
-fn batches(jobs: Vec<Job>) -> Vec<Vec<Job>> {
+fn batches(model: &str, jobs: Vec<Job>) -> Vec<Vec<Job>> {
+    let (max_threads, max_chars) = if model == INITIAL_MODEL {
+        (20, 28_000)
+    } else {
+        (6, 9_000)
+    };
     let mut batches = Vec::new();
     let mut batch = Vec::new();
     let mut chars = 0;
     for job in jobs {
         let size = job.capsule.chars().count() + job.prior.as_deref().unwrap_or("").chars().count();
-        if !batch.is_empty() && (batch.len() == BATCH_THREADS || chars + size > BATCH_CHARS) {
+        if !batch.is_empty() && (batch.len() == max_threads || chars + size > max_chars) {
             batches.push(std::mem::take(&mut batch));
             chars = 0;
         }

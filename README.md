@@ -31,9 +31,9 @@ the first install labels the available archive with `gpt-5.6-sol` at low
 reasoning. later Codex launches use `gpt-5.3-codex-spark` only for
 conversations whose transcript changed.
 
-requests are batched up to ten conversations. each conversation sends a
-bounded capsule: its first ask, prior label, and recent turns. labels are at
-most 12 words.
+the first pass batches up to 20 conversations. Spark refreshes batch up to six.
+each conversation sends a bounded capsule: its first ask, prior label, and
+recent turns. labels are at most 12 words.
 
 this consumes Codex model usage. the first pass scales with archive size;
 later usage scales with changed conversations. conversation excerpts are sent
