@@ -120,7 +120,7 @@ fn run_labels_locked(
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
     let state = Connection::open(state_path)?;
-    state.busy_timeout(std::time::Duration::from_secs(2))?;
+    state.busy_timeout(std::time::Duration::from_secs(10))?;
     let mut statement = state.prepare(
         "SELECT id, rollout_path, first_user_message, preview
          FROM threads WHERE rollout_path <> ''",
@@ -161,10 +161,10 @@ fn run_labels_locked(
             )
             .optional()?;
         if let Some((dev, inode, length, label)) = &cached {
-            state.execute(
+            let _ = state.execute(
                 "UPDATE threads SET preview = ?1 WHERE id = ?2",
                 (label, &id),
-            )?;
+            );
             if (*dev, *inode, *length) == fingerprint {
                 continue;
             }
@@ -235,7 +235,7 @@ fn process_jobs(
         match run_model(model, &batch, plugin_data, batch_number) {
             Ok(labels) => {
                 let state = Connection::open(state_path)?;
-                state.busy_timeout(std::time::Duration::from_secs(2))?;
+                state.busy_timeout(std::time::Duration::from_secs(10))?;
                 for job in &batch {
                     let Some(label) = labels.get(&job.id) else {
                         continue;
@@ -257,10 +257,10 @@ fn process_jobs(
                             label,
                         ),
                     )?;
-                    state.execute(
+                    let _ = state.execute(
                         "UPDATE threads SET preview = ?1 WHERE id = ?2",
                         (label, &job.id),
-                    )?;
+                    );
                     done += 1;
                 }
             }
