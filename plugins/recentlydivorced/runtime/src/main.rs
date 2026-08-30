@@ -137,19 +137,18 @@ fn update_preview(state_db: &PathBuf, session_id: &str, prompt: &str) {
     if !state_db.exists() {
         return;
     }
-    for _ in 0..20 {
+    for _ in 0..5 {
         if let Ok(connection) = Connection::open(&state_db) {
-            let _ = connection.busy_timeout(Duration::from_millis(100));
-            if let Ok(updated) = connection.execute(
+            let _ = connection.busy_timeout(Duration::from_millis(20));
+            match connection.execute(
                 "UPDATE threads SET preview = ?1 WHERE id = ?2",
                 (prompt, session_id),
             ) {
-                if updated > 0 {
-                    return;
-                }
+                Ok(_) => return,
+                Err(_) => {}
             }
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -252,6 +251,27 @@ mod tests {
                 .query_row("SELECT preview FROM threads WHERE id = 'two'", [], |row| row.get::<_, String>(0))
                 .unwrap(),
             "untouched"
+        );
+    }
+
+    #[test]
+    fn missing_thread_returns_without_creating_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_db = temp.path().join("state_5.sqlite");
+        let connection = Connection::open(&state_db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, preview TEXT NOT NULL);")
+            .unwrap();
+        drop(connection);
+
+        update_preview(&state_db, "missing", "first prompt");
+
+        let connection = Connection::open(&state_db).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
         );
     }
 

@@ -7,9 +7,7 @@
           {
             "type": "command",
             "command": "${PLUGIN_DATA}/recentlydivorced",
-            "timeout": 2,
-            "async": true,
-            "statusMessage": "Updating resume preview"
+            "timeout": 1
           }
         ]
       }
