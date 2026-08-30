@@ -171,7 +171,13 @@ fn run_labels_locked(
                 continue;
             }
         }
-        let Some(capsule) = conversation_capsule(&path, &first_user_message, &preview) else {
+        let prior = cached.as_ref().map(|cached| cached.3.clone());
+        let capsule = if prior.is_some() {
+            conversation_capsule(&path, &first_user_message, &preview)
+        } else {
+            index_capsule(&first_user_message, &preview)
+        };
+        let Some(capsule) = capsule else {
             continue;
         };
         let job = Job {
@@ -181,7 +187,7 @@ fn run_labels_locked(
             inode: fingerprint.1,
             length: fingerprint.2,
             capsule,
-            prior: cached.map(|cached| cached.3),
+            prior,
         };
         if job.prior.is_some() {
             changed.push(job);
@@ -467,6 +473,25 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
     (!capsule.is_empty()).then_some(capsule)
 }
 
+fn index_capsule(first_user: &str, preview: &str) -> Option<String> {
+    let first = compact_text(first_user, 700);
+    let preview = compact_text(preview, 500);
+    let mut capsule = String::new();
+    if !first.is_empty() && !synthetic_prompt(&first) {
+        capsule.push_str("goal: ");
+        capsule.push_str(&first);
+    }
+    if !preview.is_empty() && preview != first && !synthetic_prompt(&preview) {
+        if !capsule.is_empty() {
+            capsule.push('\n');
+        }
+        capsule.push_str("current index: ");
+        capsule.push_str(&preview);
+    }
+    let capsule = compact_text(&capsule, CAPSULE_CHARS);
+    (!capsule.is_empty()).then_some(capsule)
+}
+
 fn synthetic_prompt(text: &str) -> bool {
     text.starts_with("# AGENTS.md instructions")
         || text.starts_with("<environment_context>")
@@ -627,8 +652,8 @@ fn unix_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPSULE_CHARS, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule, normalize_label,
-        run_model,
+        CAPSULE_CHARS, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule, index_capsule,
+        normalize_label, run_model,
     };
 
     #[test]
@@ -651,6 +676,10 @@ mod tests {
         assert!(capsule.contains("user: fix the sole lighting"));
         assert!(!capsule.contains("AGENTS"));
         assert!(capsule.chars().count() <= CAPSULE_CHARS);
+        assert_eq!(
+            index_capsule("build a boot visualizer", "fix the sole lighting").unwrap(),
+            "goal: build a boot visualizer current index: fix the sole lighting"
+        );
     }
 
     #[test]
