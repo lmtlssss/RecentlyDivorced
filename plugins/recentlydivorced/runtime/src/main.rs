@@ -232,7 +232,7 @@ fn process_jobs(
     let total = jobs.len();
     let mut done = 0;
     for (batch_number, batch) in batches(model, jobs).into_iter().enumerate() {
-        match run_model(model, &batch, plugin_data, batch_number) {
+        match run_model_resilient(model, &batch, plugin_data, batch_number) {
             Ok(labels) => {
                 let state = Connection::open(state_path)?;
                 state.busy_timeout(std::time::Duration::from_secs(10))?;
@@ -271,6 +271,29 @@ fn process_jobs(
         }
     }
     Ok(())
+}
+
+fn run_model_resilient(
+    model: &str,
+    jobs: &[Job],
+    plugin_data: &Path,
+    run: usize,
+) -> Result<HashMap<String, String>, Box<dyn Error>> {
+    match run_model(model, jobs, plugin_data, run) {
+        Ok(labels) => Ok(labels),
+        Err(_) if jobs.len() > 1 => {
+            let middle = jobs.len() / 2;
+            let mut labels = run_model_resilient(model, &jobs[..middle], plugin_data, run * 2 + 1)?;
+            labels.extend(run_model_resilient(
+                model,
+                &jobs[middle..],
+                plugin_data,
+                run * 2 + 2,
+            )?);
+            Ok(labels)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn batches(model: &str, jobs: Vec<Job>) -> Vec<Vec<Job>> {
