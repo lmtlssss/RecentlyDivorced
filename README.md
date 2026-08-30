@@ -35,8 +35,9 @@ the first pass batches up to 100 conversations, then permanently marks the
 bootstrap complete. after that, every new or changed conversation uses Spark
 in batches up to six. Sol is not used for maintenance.
 
-each conversation sends at most 480 characters: its first ask, prior label,
-and latest three semantic turns. labels are at most 12 words.
+each conversation sends at most 480 characters. the latest persisted Codex
+context summary is preferred; chats without one use the first ask, prior
+label, and latest three semantic turns. labels are at most 12 words.
 
 this consumes Codex model usage. the first pass scales with archive size;
 later usage scales with changed conversations. conversation excerpts are sent

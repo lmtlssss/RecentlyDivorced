@@ -94,11 +94,11 @@ fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if generation.as_deref() != Some("rollout-tail-v1") {
+    if generation.as_deref() != Some("context-summary-v1") {
         connection.execute("DELETE FROM summaries", [])?;
         connection.execute("DELETE FROM meta WHERE key = 'bootstrap_complete'", [])?;
         connection.execute(
-            "INSERT INTO meta VALUES ('capsule_generation', 'rollout-tail-v1')
+            "INSERT INTO meta VALUES ('capsule_generation', 'context-summary-v1')
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [],
         )?;
@@ -172,6 +172,7 @@ fn run_labels_locked(
 
     let mut initial = Vec::new();
     let mut changed = Vec::new();
+    let mut cached_projection = Vec::new();
     for row in rows.filter_map(Result::ok) {
         let (id, path, first_user_message, preview) = row;
         let Ok(metadata) = fs::metadata(&path) else {
@@ -197,10 +198,7 @@ fn run_labels_locked(
             )
             .optional()?;
         if let Some((dev, inode, length, label)) = &cached {
-            let _ = state.execute(
-                "UPDATE threads SET preview = ?1 WHERE id = ?2",
-                (label, &id),
-            );
+            cached_projection.push((id.clone(), label.clone()));
             if (*dev, *inode, *length) == fingerprint {
                 continue;
             }
@@ -224,6 +222,13 @@ fn run_labels_locked(
         }
     }
     drop(statement);
+    if let Ok(transaction) = state.unchecked_transaction() {
+        for (id, label) in cached_projection {
+            let _ =
+                transaction.execute("UPDATE threads SET preview = ?1 WHERE id = ?2", (label, id));
+        }
+        let _ = transaction.commit();
+    }
 
     if verbose {
         eprintln!(
@@ -264,13 +269,12 @@ fn process_jobs(
     for (batch_number, batch) in batches(model, jobs).into_iter().enumerate() {
         match run_model_resilient(model, &batch, plugin_data, batch_number) {
             Ok(labels) => {
-                let state = Connection::open(state_path)?;
-                state.busy_timeout(std::time::Duration::from_secs(10))?;
+                let cache_transaction = cache.unchecked_transaction()?;
                 for job in &batch {
                     let Some(label) = labels.get(&job.id) else {
                         continue;
                     };
-                    cache.execute(
+                    cache_transaction.execute(
                         "INSERT INTO summaries VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                          ON CONFLICT(thread_id) DO UPDATE SET
                            rollout_path=excluded.rollout_path,
@@ -287,11 +291,18 @@ fn process_jobs(
                             label,
                         ),
                     )?;
-                    let _ = state.execute(
-                        "UPDATE threads SET preview = ?1 WHERE id = ?2",
-                        (label, &job.id),
-                    );
-                    done += 1;
+                }
+                cache_transaction.commit()?;
+                done += labels.len();
+
+                let state = Connection::open(state_path)?;
+                state.busy_timeout(std::time::Duration::from_secs(10))?;
+                if let Ok(transaction) = state.unchecked_transaction() {
+                    for (id, label) in &labels {
+                        let _ = transaction
+                            .execute("UPDATE threads SET preview = ?1 WHERE id = ?2", (label, id));
+                    }
+                    let _ = transaction.commit();
                 }
             }
             Err(error) => eprintln!("RecentlyDivorced: {model} batch failed: {error}"),
@@ -478,14 +489,24 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
         }
     }
     let mut tail = VecDeque::new();
+    let mut context_summary = None;
     for line in reader.lines().map_while(Result::ok) {
-        if !line.contains("\"type\":\"response_item\"") || !line.contains("\"type\":\"message\"") {
+        if !line.contains("\"type\":\"compacted\"")
+            && (!line.contains("\"type\":\"response_item\"")
+                || !line.contains("\"type\":\"message\""))
+        {
             continue;
         }
         let Ok(item) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         let payload = &item["payload"];
+        if item["type"] == "compacted" {
+            context_summary = payload["message"]
+                .as_str()
+                .map(|message| compact_text(message, 360));
+            continue;
+        }
         if item["type"] != "response_item" || payload["type"] != "message" {
             continue;
         }
@@ -510,6 +531,18 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
         if tail.len() > 3 {
             tail.pop_front();
         }
+    }
+    if let Some(summary) = context_summary.filter(|summary| !summary.is_empty()) {
+        let latest = tail
+            .iter()
+            .rev()
+            .find(|message| message.starts_with("user: "))
+            .map(|message| compact_text(message, 110))
+            .unwrap_or_default();
+        return Some(compact_text(
+            &format!("context: {summary} latest: {latest}"),
+            CAPSULE_CHARS,
+        ));
     }
     let mut capsule = String::new();
     let first = compact_text(first_user, 180);
@@ -713,6 +746,16 @@ mod tests {
         assert!(capsule.contains("user: fix the sole lighting"));
         assert!(!capsule.contains("AGENTS"));
         assert!(capsule.chars().count() <= CAPSULE_CHARS);
+
+        std::fs::write(
+            &rollout,
+            r#"{"type":"compacted","payload":{"message":"camera works; sole lighting remains","replacement_history":null}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            conversation_capsule(&rollout, "ignored fallback", "").unwrap(),
+            "context: camera works; sole lighting remains latest:"
+        );
     }
 
     #[test]
