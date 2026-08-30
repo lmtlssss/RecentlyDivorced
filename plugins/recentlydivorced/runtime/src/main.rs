@@ -159,7 +159,12 @@ fn run_labels_locked(
     state.busy_timeout(std::time::Duration::from_secs(10))?;
     let mut statement = state.prepare(
         "SELECT id, rollout_path, first_user_message, preview
-         FROM threads WHERE rollout_path <> ''",
+         FROM threads
+         WHERE source = 'cli'
+           AND thread_source = 'user'
+           AND agent_role IS NULL
+           AND history_mode = 'paginated'
+           AND rollout_path <> ''",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -592,8 +597,14 @@ fn normalize_label(label: &str) -> String {
 fn print_estimate() -> Result<(), Box<dyn Error>> {
     let (state_path, _) = paths()?;
     let connection = Connection::open(state_path)?;
-    let mut statement =
-        connection.prepare("SELECT rollout_path FROM threads WHERE rollout_path <> ''")?;
+    let mut statement = connection.prepare(
+        "SELECT rollout_path FROM threads
+         WHERE source = 'cli'
+           AND thread_source = 'user'
+           AND agent_role IS NULL
+           AND history_mode = 'paginated'
+           AND rollout_path <> ''",
+    )?;
     let mut count = 0;
     let mut bytes = 0;
     for path in statement

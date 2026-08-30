@@ -27,9 +27,13 @@ sh install.sh
 
 ## usage
 
-the curl installer automatically crawls every available rollout and labels it
-with `gpt-5.6-sol` at low reasoning. later Codex launches automatically use
-`gpt-5.3-codex-spark` only for rollouts whose file fingerprint changed.
+the curl installer automatically crawls every top-level CLI conversation log
+and labels it with `gpt-5.6-sol` at low reasoning. later Codex launches
+automatically use `gpt-5.3-codex-spark` only for logs whose file fingerprint
+changed.
+
+only top-level interactive CLI conversations are indexed. subagents, exec
+runs, forks, and internal threads are excluded.
 
 the first pass batches up to 100 conversations, then permanently marks the
 bootstrap complete. after that, every new or changed conversation uses Spark
