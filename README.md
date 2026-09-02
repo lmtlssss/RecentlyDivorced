@@ -32,7 +32,7 @@ the source ladder is:
 
 legacy and paginated top-level human CLI rows are covered. subagents, exec,
 fork, and internal threads are excluded. local rollout reading stops at 64 KiB;
-model input stops at 480 characters.
+conversation evidence stops at 480 characters.
 
 the first pass batches with Sol at low reasoning. changed-only maintenance uses
 Spark. one-line labels stay short.

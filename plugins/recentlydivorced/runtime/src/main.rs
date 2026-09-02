@@ -669,21 +669,30 @@ fn print_estimate() -> Result<(), Box<dyn Error>> {
     let (state_path, _) = paths()?;
     let connection = Connection::open(state_path)?;
     let mut statement = connection.prepare(&format!(
-        "SELECT rollout_path FROM threads WHERE {HUMAN_THREAD_FILTER}"
+        "SELECT rollout_path, first_user_message, preview FROM threads WHERE {HUMAN_THREAD_FILTER}"
     ))?;
     let mut count = 0;
-    let mut bytes = 0;
-    for path in statement
-        .query_map([], |row| row.get::<_, String>(0))?
+    let mut bytes = 0u64;
+    for (path, first_user, preview) in statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
         .filter_map(Result::ok)
     {
-        if let Ok(metadata) = fs::metadata(path) {
+        if conversation_capsule(Path::new(&path), &first_user, &preview).is_some() {
             count += 1;
-            bytes += metadata.len();
+            if let Ok(metadata) = fs::metadata(path) {
+                bytes += metadata.len().min(TAIL_BYTES);
+            }
         }
     }
     println!(
-        "{count} conversations ({:.0} MiB of local rollouts)",
+        "{count} labelable conversations; maximum capsule characters: {}; bounded local-tail: {:.2} MiB",
+        count * CAPSULE_CHARS,
         bytes as f64 / 1_048_576.0
     );
     Ok(())
@@ -725,7 +734,7 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let mut stdout = BufReader::new(child.stdout.take().ok_or("missing app-server stdout")?);
     write_jsonrpc(
         &mut stdin,
-        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.4"}}}),
+        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.5"}}}),
     )?;
     write_jsonrpc(
         &mut stdin,
