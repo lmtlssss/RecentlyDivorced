@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-init='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-uninstaller","version":"0.1.0"}}}'
+init='{"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-uninstaller","version":"0.3.3"}}}'
 ready='{"method":"initialized","params":{}}'
 clear='{"method":"config/batchWrite","id":2,"params":{"edits":[{"keyPath":"hooks.state.\"recentlydivorced@recentlydivorced:hooks/hooks.json:session_start:0:0\"","value":null,"mergeStrategy":"replace"},{"keyPath":"hooks.state.\"recentlydivorced@recentlydivorced:hooks/hooks.json:user_prompt_submit:0:0\"","value":null,"mergeStrategy":"replace"}],"reloadUserConfig":true}}'
 codex_home="${CODEX_HOME:-$HOME/.codex}"

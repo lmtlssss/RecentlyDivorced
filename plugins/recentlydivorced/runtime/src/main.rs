@@ -15,6 +15,8 @@ const UPDATE_MODEL: &str = "gpt-5.3-codex-spark";
 const CAPSULE_CHARS: usize = 480;
 const TAIL_BYTES: u64 = 65_536;
 const LOCK_TTL_SECONDS: i64 = 21_600;
+const HUMAN_THREAD_FILTER: &str =
+    "source = 'cli' AND thread_source = 'user' AND agent_role IS NULL AND rollout_path <> ''";
 
 #[derive(Clone)]
 struct Job {
@@ -94,11 +96,11 @@ fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if generation.as_deref() != Some("context-summary-v1") {
+    if generation.as_deref() != Some("source-ladder-v2") {
         connection.execute("DELETE FROM summaries", [])?;
         connection.execute("DELETE FROM meta WHERE key = 'bootstrap_complete'", [])?;
         connection.execute(
-            "INSERT INTO meta VALUES ('capsule_generation', 'context-summary-v1')
+            "INSERT INTO meta VALUES ('capsule_generation', 'source-ladder-v2')
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [],
         )?;
@@ -158,13 +160,7 @@ fn run_labels_locked(
     let state = Connection::open(state_path)?;
     state.busy_timeout(std::time::Duration::from_secs(10))?;
     let mut statement = state.prepare(
-        "SELECT id, rollout_path, first_user_message, preview
-         FROM threads
-         WHERE source = 'cli'
-           AND thread_source = 'user'
-           AND agent_role IS NULL
-           AND history_mode = 'paginated'
-           AND rollout_path <> ''",
+        &format!("SELECT id, rollout_path, first_user_message, preview FROM threads WHERE {HUMAN_THREAD_FILTER}"),
     )?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -413,7 +409,7 @@ fn run_model(
         prompt.push('\n');
     }
 
-    let mut child = Command::new("codex")
+    let mut child = Command::new(stock_codex())
         .args([
             "exec",
             "--ephemeral",
@@ -473,7 +469,11 @@ fn run_model(
 }
 
 fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<String> {
-    let mut file = File::open(path).ok()?;
+    let mut embedded = embedded_capsule(first_user);
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return embedded,
+    };
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -528,8 +528,17 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
             .filter_map(|part| part["text"].as_str())
             .collect::<Vec<_>>()
             .join(" ");
+        if role == "user" {
+            if let Some(base) = embedded_capsule(&text) {
+                embedded = Some(base);
+                continue;
+            }
+            if synthetic_prompt(&text) {
+                continue;
+            }
+        }
         let text = compact_text(&text, 180);
-        if text.is_empty() || (role == "user" && synthetic_prompt(&text)) {
+        if text.is_empty() {
             continue;
         }
         tail.push_back(format!("{role}: {text}"));
@@ -546,6 +555,18 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
             .unwrap_or_default();
         return Some(compact_text(
             &format!("context: {summary} latest: {latest}"),
+            CAPSULE_CHARS,
+        ));
+    }
+    if let Some(base) = embedded {
+        let latest = tail
+            .iter()
+            .rev()
+            .find(|message| message.starts_with("user: "))
+            .map(|message| compact_text(message, 110))
+            .unwrap_or_default();
+        return Some(compact_text(
+            &format!("{base} latest: {latest}"),
             CAPSULE_CHARS,
         ));
     }
@@ -573,6 +594,56 @@ fn synthetic_prompt(text: &str) -> bool {
         || text.contains("<skills_instructions>")
         || text.contains("<permissions instructions>")
         || text.contains("<collaboration_mode>")
+        || text.contains("--- capsule ---")
+        || (text.starts_with("Read ")
+            && text.contains("/project-maps/")
+            && text.contains("Use its Objective, Cursor, and Next action."))
+}
+
+fn embedded_capsule(text: &str) -> Option<String> {
+    if !text.contains("# CompactVeteran handoff") {
+        return None;
+    }
+    let start = text.find("--- capsule ---")?;
+    let body = &text[start..];
+    let objective = body
+        .split_once("## Objective\n\n")?
+        .1
+        .split_once("\n\n## Cursor")?
+        .0;
+    let cursor = body
+        .split_once("## Cursor\n\n")?
+        .1
+        .split_once("\n\n## Next action")?
+        .0;
+    let next = body
+        .split_once("## Next action\n\n")?
+        .1
+        .split_once("\n\n## Recent commits")?
+        .0;
+    Some(format!(
+        "objective: {}\ncursor: {}\nnext: {}",
+        compact_text(objective, 160),
+        compact_text(cursor, 120),
+        compact_text(next, 100)
+    ))
+}
+
+fn stock_codex() -> String {
+    for path in [
+        env::var_os("CODEX_HOME")
+            .map(|p| PathBuf::from(p).join("packages/standalone/current/bin/codex")),
+        env::var_os("HOME")
+            .map(|p| PathBuf::from(p).join(".codex/packages/standalone/current/bin/codex")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path.is_file() {
+            return path.display().to_string();
+        }
+    }
+    "codex".into()
 }
 
 fn compact_text(text: &str, max_chars: usize) -> String {
@@ -597,14 +668,9 @@ fn normalize_label(label: &str) -> String {
 fn print_estimate() -> Result<(), Box<dyn Error>> {
     let (state_path, _) = paths()?;
     let connection = Connection::open(state_path)?;
-    let mut statement = connection.prepare(
-        "SELECT rollout_path FROM threads
-         WHERE source = 'cli'
-           AND thread_source = 'user'
-           AND agent_role IS NULL
-           AND history_mode = 'paginated'
-           AND rollout_path <> ''",
-    )?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT rollout_path FROM threads WHERE {HUMAN_THREAD_FILTER}"
+    ))?;
     let mut count = 0;
     let mut bytes = 0;
     for path in statement
@@ -650,7 +716,7 @@ fn restore_stock() -> Result<(), Box<dyn Error>> {
 
 fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let cwd = env::current_dir()?.display().to_string();
-    let mut child = Command::new("codex")
+    let mut child = Command::new(stock_codex())
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -659,7 +725,7 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let mut stdout = BufReader::new(child.stdout.take().ok_or("missing app-server stdout")?);
     write_jsonrpc(
         &mut stdin,
-        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.2.0"}}}),
+        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.3"}}}),
     )?;
     write_jsonrpc(
         &mut stdin,
@@ -733,9 +799,10 @@ fn unix_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPSULE_CHARS, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule, normalize_label,
-        run_model,
+        CAPSULE_CHARS, HUMAN_THREAD_FILTER, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule,
+        normalize_label, run_model,
     };
+    use rusqlite::Connection;
 
     #[test]
     fn capsule_is_small_and_keeps_the_human_goal_and_tail() {
@@ -777,6 +844,51 @@ mod tests {
             ),
             "building the resume index with compact conversation labels that stay useful after"
         );
+    }
+
+    #[test]
+    fn compactveteran_capsule_survives_missing_rollout_and_tail_embedding() {
+        let embedded = "--- capsule ---\n# CompactVeteran handoff\n\n## Objective\n\nship the objective\n\n## Cursor\n\ncurrent cursor\n\n## Next action\n\nperform the next action\n\n## Recent commits\n\nnone";
+        let capsule = conversation_capsule(std::path::Path::new("/missing"), embedded, "").unwrap();
+        assert!(capsule.contains("objective: ship the objective"));
+        assert!(capsule.contains("cursor: current cursor"));
+        assert!(capsule.contains("next: perform the next action"));
+        let temp = tempfile::tempdir().unwrap();
+        let rollout = temp.path().join("tail.jsonl");
+        std::fs::write(&rollout, [
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":embedded}]}}).to_string(),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"ship the compatibility fix"}]}}).to_string(),
+        ].join("\n")).unwrap();
+        let capsule = conversation_capsule(&rollout, "ordinary first ask", "").unwrap();
+        assert!(capsule.contains("objective: ship the objective"));
+        assert!(capsule.contains("cursor: current cursor"));
+        assert!(capsule.contains("next: perform the next action"));
+        assert!(capsule.contains("latest: user: ship the compatibility fix"));
+        assert!(!capsule.contains("Continue a prior Sol"));
+        assert!(!capsule.contains("--- capsule ---"));
+        assert!(capsule.chars().count() <= CAPSULE_CHARS);
+    }
+
+    #[test]
+    fn human_thread_filter_covers_legacy_and_paginated_only() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE threads (id TEXT, source TEXT, thread_source TEXT, agent_role TEXT, rollout_path TEXT, history_mode TEXT)", []).unwrap();
+        for row in [("legacy", "legacy"), ("page", "paginated")] {
+            db.execute(
+                "INSERT INTO threads VALUES (?1,'cli','user',NULL,'/tmp/x',?2)",
+                (&row.0, &row.1),
+            )
+            .unwrap();
+        }
+        db.execute("INSERT INTO threads VALUES ('sub','cli','user','worker','/tmp/x','paginated'),('fork','cli','fork',NULL,'/tmp/x','paginated')", []).unwrap();
+        let count: i64 = db
+            .query_row(
+                &format!("SELECT count(*) FROM threads WHERE {HUMAN_THREAD_FILTER}"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]

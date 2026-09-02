@@ -1,14 +1,11 @@
 # RecentlyDivorced
 
-labels every `/resume` row with a tiny description of the conversation.
+labels every top-level human CLI conversation.
 
 ```text
-RECENTLYDIVORCED
-──────────────────────────────────────────────────────────────
-
-codex starts  ──►  changed conversations  ──►  one-line labels
-                                                   │
-                                                   └─ /resume
+stock compaction summary ─┐
+CompactVeteran handoff    ├─► 480-char capsule ─► 12-word label ─► /resume
+young chat ───────────────┘
 ```
 
 ## install
@@ -27,34 +24,24 @@ sh install.sh
 
 ## usage
 
-the curl installer automatically crawls every top-level CLI conversation log
-and labels it with `gpt-5.6-sol` at low reasoning. later Codex launches
-automatically use `gpt-5.3-codex-spark` only for logs whose file fingerprint
-changed.
+the source ladder is:
 
-only top-level interactive CLI conversations are indexed. subagents, exec
-runs, forks, and internal threads are excluded.
+1. stock compaction summary, plus the latest user turn;
+2. CompactVeteran Objective + Cursor + Next action;
+3. young first ask + latest three semantic turns.
 
-the first pass batches up to 100 conversations, then permanently marks the
-bootstrap complete. after that, every new or changed conversation uses Spark
-in batches up to six. Sol is not used for maintenance.
+legacy and paginated top-level human CLI rows are covered. subagents, exec,
+fork, and internal threads are excluded. local rollout reading stops at 64 KiB;
+model input stops at 480 characters.
 
-each conversation sends at most 480 characters. the latest persisted Codex
-context summary is preferred; chats without one use the first ask, prior
-label, and latest three semantic turns. labels are at most 12 words.
-
-this consumes Codex model usage. the first pass scales with archive size;
-later usage scales with changed conversations. conversation excerpts are sent
-to OpenAI through the installed Codex CLI.
+the first pass batches with Sol at low reasoning. changed-only maintenance uses
+Spark. one-line labels stay short.
 
 ## uninstall
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lmtlssss/RecentlyDivorced/main/uninstall.sh | sh
 ```
-
-uninstall restores stock previews and removes the plugin, marketplace, hook
-trust, helper, and summary index.
 
 ## build
 
