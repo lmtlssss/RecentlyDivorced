@@ -48,12 +48,10 @@ fn refresh_decision(
     pending: bool,
     extracted: &str,
 ) -> RefreshDecision {
-    if !pending && same_fingerprint && !cached.is_empty() && extracted.is_empty() {
+    if !cached.is_empty() && extracted == cached {
         RefreshDecision::Reuse
     } else if !pending && same_fingerprint && cached.is_empty() {
         RefreshDecision::Seed
-    } else if !pending && !extracted.is_empty() && extracted == cached {
-        RefreshDecision::Reuse
     } else {
         RefreshDecision::Relabel
     }
@@ -258,6 +256,15 @@ fn run_labels_locked(
                 },
             )
             .optional()?;
+        if let Some((dev, inode, length, label, cached_activity)) = &cached {
+            if pending.as_deref().unwrap_or("").is_empty()
+                && (*dev, *inode, *length) == fingerprint
+                && !cached_activity.is_empty()
+            {
+                cached_projection.push((id.clone(), label.clone()));
+                continue;
+            }
+        }
         let Some(evidence) =
             conversation_evidence(&path, &first_user_message, &preview, pending.as_deref())
         else {
@@ -1213,6 +1220,10 @@ mod tests {
         assert_eq!(
             refresh_decision("old", false, true, "new"),
             RefreshDecision::Relabel
+        );
+        assert_eq!(
+            refresh_decision("same", false, true, "same"),
+            RefreshDecision::Reuse
         );
         assert_eq!(
             refresh_decision("same", false, false, "same"),
