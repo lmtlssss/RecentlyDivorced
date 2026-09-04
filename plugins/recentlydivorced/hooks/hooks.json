@@ -1,6 +1,7 @@
 {
   "description": "Label Codex resume rows with short conversation summaries.",
   "hooks": {
+    "UserPromptSubmit": [{"matcher":".*","hooks":[{"type":"command","command":"${PLUGIN_DATA}/recentlydivorced --activity","timeout":5}]}],
     "SessionStart": [
       {
         "matcher": "startup|resume",

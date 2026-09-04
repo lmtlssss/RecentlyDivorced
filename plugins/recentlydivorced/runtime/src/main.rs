@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,7 +26,13 @@ struct Job {
     inode: i64,
     length: i64,
     capsule: String,
+    activity: String,
     prior: Option<String>,
+}
+
+struct Evidence {
+    capsule: String,
+    activity: String,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +46,12 @@ struct ModelLabel {
     label: String,
 }
 
+#[derive(Deserialize)]
+struct ActivityInput {
+    session_id: String,
+    prompt: String,
+}
+
 fn main() {
     let command = env::args().nth(1).unwrap_or_default();
     let result = match command.as_str() {
@@ -47,6 +59,10 @@ fn main() {
         "--catch-up" => run_labels(true),
         "--refresh" if env::var_os("RECENTLYDIVORCED_INTERNAL").is_none() => run_labels(false),
         "--estimate" => print_estimate(),
+        "--activity" => {
+            let _ = activity_hook();
+            Ok(())
+        }
         "--restore" => restore_stock(),
         _ => Ok(()),
     };
@@ -77,8 +93,11 @@ fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
             dev INTEGER NOT NULL,
             inode INTEGER NOT NULL,
             processed_len INTEGER NOT NULL,
-            label TEXT NOT NULL
+            label TEXT NOT NULL,
+            activity TEXT NOT NULL DEFAULT ''
          );
+         CREATE TABLE IF NOT EXISTS original_names (thread_id TEXT PRIMARY KEY, name TEXT);
+         CREATE TABLE IF NOT EXISTS pending_activity (thread_id TEXT PRIMARY KEY, activity TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS locks (
             name TEXT PRIMARY KEY,
             owner TEXT NOT NULL,
@@ -89,6 +108,10 @@ fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
             value TEXT NOT NULL
          );",
     )?;
+    let _ = connection.execute(
+        "ALTER TABLE summaries ADD COLUMN activity TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let generation = connection
         .query_row(
             "SELECT value FROM meta WHERE key = 'capsule_generation'",
@@ -184,27 +207,43 @@ fn run_labels_locked(
             metadata.ino() as i64,
             metadata.len() as i64,
         );
+        let pending = cache
+            .query_row(
+                "SELECT activity FROM pending_activity WHERE thread_id=?1",
+                [&id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
         let cached = cache
             .query_row(
-                "SELECT dev, inode, processed_len, label FROM summaries WHERE thread_id = ?1",
+            "SELECT dev, inode, processed_len, label, activity FROM summaries WHERE thread_id = ?1",
                 [&id],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((dev, inode, length, label)) = &cached {
-            cached_projection.push((id.clone(), label.clone()));
-            if (*dev, *inode, *length) == fingerprint {
+        if let Some((dev, inode, length, label, cached_activity)) = &cached {
+            let current = pending.as_deref().unwrap_or("");
+            if !current.is_empty() {
+                if current == cached_activity {
+                    cached_projection.push((id.clone(), label.clone()));
+                    continue;
+                }
+            } else if (*dev, *inode, *length) == fingerprint {
+                cached_projection.push((id.clone(), label.clone()));
                 continue;
             }
         }
-        let Some(capsule) = conversation_capsule(&path, &first_user_message, &preview) else {
+        let Some(evidence) =
+            conversation_evidence(&path, &first_user_message, &preview, pending.as_deref())
+        else {
             continue;
         };
         let job = Job {
@@ -213,7 +252,8 @@ fn run_labels_locked(
             dev: fingerprint.0,
             inode: fingerprint.1,
             length: fingerprint.2,
-            capsule,
+            capsule: evidence.capsule,
+            activity: evidence.activity,
             prior: cached.map(|cached| cached.3),
         };
         if job.prior.is_some() || !bootstrap {
@@ -225,8 +265,10 @@ fn run_labels_locked(
     drop(statement);
     if let Ok(transaction) = state.unchecked_transaction() {
         for (id, label) in cached_projection {
-            let _ =
-                transaction.execute("UPDATE threads SET preview = ?1 WHERE id = ?2", (label, id));
+            let _ = transaction.execute(
+                "UPDATE threads SET name = ?1, preview = ?1 WHERE id = ?2",
+                (label, id),
+            );
         }
         let _ = transaction.commit();
     }
@@ -276,13 +318,14 @@ fn process_jobs(
                         continue;
                     };
                     cache_transaction.execute(
-                        "INSERT INTO summaries VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        "INSERT INTO summaries(thread_id,rollout_path,dev,inode,processed_len,label,activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                          ON CONFLICT(thread_id) DO UPDATE SET
                            rollout_path=excluded.rollout_path,
                            dev=excluded.dev,
                            inode=excluded.inode,
                            processed_len=excluded.processed_len,
-                           label=excluded.label",
+                           label=excluded.label,
+                           activity=excluded.activity",
                         (
                             &job.id,
                             job.path.display().to_string(),
@@ -290,8 +333,11 @@ fn process_jobs(
                             job.inode,
                             job.length,
                             label,
+                            &job.activity,
                         ),
                     )?;
+                    cache_transaction
+                        .execute("DELETE FROM pending_activity WHERE thread_id=?1", [&job.id])?;
                 }
                 cache_transaction.commit()?;
                 done += labels.len();
@@ -300,8 +346,10 @@ fn process_jobs(
                 state.busy_timeout(std::time::Duration::from_secs(10))?;
                 if let Ok(transaction) = state.unchecked_transaction() {
                     for (id, label) in &labels {
-                        let _ = transaction
-                            .execute("UPDATE threads SET preview = ?1 WHERE id = ?2", (label, id));
+                        let _ = transaction.execute(
+                            "UPDATE threads SET name = ?1, preview = ?1 WHERE id = ?2",
+                            (label, id),
+                        );
                     }
                     let _ = transaction.commit();
                 }
@@ -468,15 +516,35 @@ fn run_model(
     Ok(labels)
 }
 
-fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<String> {
+fn conversation_evidence(
+    path: &Path,
+    first_user: &str,
+    preview: &str,
+    pending: Option<&str>,
+) -> Option<Evidence> {
     let mut embedded = embedded_capsule(first_user);
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(_) => return embedded,
+        Err(_) => {
+            return embedded.map(|capsule| Evidence {
+                capsule,
+                activity: pending.unwrap_or("").to_string(),
+            });
+        }
     };
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
+    let mut partial_activity = String::new();
+    if start > 0 {
+        let mut prefix = Vec::new();
+        let mut probe = File::open(path).ok()?;
+        probe.seek(SeekFrom::Start(start)).ok()?;
+        probe.take(TAIL_BYTES).read_to_end(&mut prefix).ok()?;
+        if let Some(nl) = prefix.iter().position(|b| *b == b'\n') {
+            partial_activity = recover_partial_text(&prefix[..nl]);
+        }
+    }
     let mut reader = BufReader::new(file);
     if start > 0 {
         loop {
@@ -553,10 +621,16 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
             .find(|message| message.starts_with("user: "))
             .map(|message| compact_text(message, 110))
             .unwrap_or_default();
-        return Some(compact_text(
-            &format!("context: {summary} latest: {latest}"),
-            CAPSULE_CHARS,
-        ));
+        let activity = pending
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| latest.strip_prefix("user: ").unwrap_or(""));
+        return Some(Evidence {
+            capsule: compact_text(
+                &format!("current activity: {activity}\nbackground: {summary}\nrecent: {latest}"),
+                CAPSULE_CHARS,
+            ),
+            activity: compact_text(activity, CAPSULE_CHARS),
+        });
     }
     if let Some(base) = embedded {
         let latest = tail
@@ -565,12 +639,36 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
             .find(|message| message.starts_with("user: "))
             .map(|message| compact_text(message, 110))
             .unwrap_or_default();
-        return Some(compact_text(
-            &format!("{base} latest: {latest}"),
-            CAPSULE_CHARS,
-        ));
+        let activity = pending
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| latest.strip_prefix("user: ").unwrap_or(""));
+        return Some(Evidence {
+            capsule: compact_text(
+                &format!("current activity: {activity}\nbackground: {base}\nrecent: {latest}"),
+                CAPSULE_CHARS,
+            ),
+            activity: compact_text(activity, CAPSULE_CHARS),
+        });
     }
     let mut capsule = String::new();
+    let latest = tail
+        .iter()
+        .rev()
+        .find(|message| message.starts_with("user: "))
+        .map(|message| message.strip_prefix("user: ").unwrap_or(message))
+        .unwrap_or("")
+        .to_string();
+    let recovered = if partial_activity.is_empty() {
+        latest.clone()
+    } else {
+        partial_activity
+    };
+    let activity = pending.filter(|s| !s.is_empty()).unwrap_or(&recovered);
+    if !activity.is_empty() {
+        capsule.push_str("current activity: ");
+        capsule.push_str(activity);
+        capsule.push('\n');
+    }
     let first = compact_text(first_user, 180);
     if !first.is_empty() && !synthetic_prompt(&first) {
         capsule.push_str("goal: ");
@@ -585,7 +683,35 @@ fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<
     }
     capsule.push_str(&tail.into_iter().collect::<Vec<_>>().join("\n"));
     let capsule = compact_text(&capsule, CAPSULE_CHARS);
-    (!capsule.is_empty()).then_some(capsule)
+    (!capsule.is_empty()).then_some(Evidence {
+        capsule: compact_text(&capsule, CAPSULE_CHARS),
+        activity: compact_text(activity, CAPSULE_CHARS),
+    })
+}
+
+fn recover_partial_text(line: &[u8]) -> String {
+    let text = String::from_utf8_lossy(line);
+    let Some(start) = text.find("\"text\":\"") else {
+        return String::new();
+    };
+    let fragment = &text[start + 8..];
+    let mut encoded = String::new();
+    let mut escaped = false;
+    for ch in fragment.chars() {
+        if !escaped && ch == '"' {
+            break;
+        }
+        encoded.push(ch);
+        escaped = !escaped && ch == '\\';
+        if ch != '\\' {
+            escaped = false;
+        }
+    }
+    serde_json::from_str::<String>(&format!("\"{encoded}\"")).unwrap_or_default()
+}
+
+fn conversation_capsule(path: &Path, first_user: &str, preview: &str) -> Option<String> {
+    conversation_evidence(path, first_user, preview, None).map(|e| e.capsule)
 }
 
 fn synthetic_prompt(text: &str) -> bool {
@@ -698,6 +824,110 @@ fn print_estimate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn activity_hook() -> Result<(), Box<dyn Error>> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let Ok(event) = serde_json::from_str::<ActivityInput>(&input) else {
+        return Ok(());
+    };
+    let stripped = strip_images(&event.prompt);
+    let original = compact_text(&stripped, CAPSULE_CHARS);
+    let activity = provisional_label(&original);
+    if activity.is_empty() {
+        return Ok(());
+    }
+    let (state_path, plugin_data) = paths()?;
+    let state = Connection::open(state_path)?;
+    let Some(old): Option<Option<String>> = state
+        .query_row(
+            "SELECT name FROM threads WHERE id = ?1",
+            [&event.session_id],
+            |r| r.get(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let cache = open_cache(&plugin_data)?;
+    cache.execute("INSERT INTO original_names(thread_id,name) VALUES (?1,?2) ON CONFLICT(thread_id) DO NOTHING", (&event.session_id, old.as_deref()))?;
+    cache.execute("INSERT INTO pending_activity(thread_id,activity) VALUES (?1,?2) ON CONFLICT(thread_id) DO UPDATE SET activity=excluded.activity", (&event.session_id, &original))?;
+    let tx = state.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE threads SET name=?1, preview=?1 WHERE id=?2",
+        (&activity, &event.session_id),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn provisional_label(prompt: &str) -> String {
+    let prompt = strip_images(prompt);
+    let lower = prompt.to_lowercase();
+    if synthetic_prompt(&prompt)
+        || [
+            "ok",
+            "okay",
+            "thanks",
+            "thank you",
+            "continue",
+            "yes",
+            "no",
+            "sure",
+        ]
+        .contains(&lower.trim())
+    {
+        return String::new();
+    }
+    let filler = [
+        "please", "can", "you", "could", "would", "just", "help", "me", "i", "need", "want", "to",
+        "the", "a", "an", "and", "also", "now", "make", "it", "this", "that", "is", "are", "have",
+        "has", "we", "our", "my",
+    ];
+    let mut out = Vec::new();
+    let mut prev = String::new();
+    for raw in prompt.split_whitespace() {
+        let word = raw.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '#' && c != '/' && c != '-' && c != '_'
+        });
+        let stem = word.to_lowercase();
+        if word.is_empty() || filler.contains(&stem.as_str()) || stem == prev {
+            continue;
+        }
+        prev = stem;
+        out.push(word.to_string());
+        if out.len() == 12 {
+            break;
+        }
+    }
+    let mut label = out.join(" ");
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    label
+}
+
+fn strip_images(prompt: &str) -> String {
+    let mut out = prompt.to_string();
+    while let Some(start) = out.find("<image") {
+        if let Some(end) = out[start..].find("</image>") {
+            out.replace_range(start..start + end + 8, "");
+        } else {
+            break;
+        }
+    }
+    let mut clean = String::new();
+    let mut rest = out.as_str();
+    while let Some(start) = rest.find("[Image #") {
+        clean.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find(']') else {
+            break;
+        };
+        rest = &rest[start + end + 1..];
+    }
+    clean.push_str(rest);
+    clean.trim().to_string()
+}
+
 fn restore_stock() -> Result<(), Box<dyn Error>> {
     let (state_path, plugin_data) = paths()?;
     let cache_path = plugin_data.join("state.sqlite");
@@ -712,9 +942,16 @@ fn restore_stock() -> Result<(), Box<dyn Error>> {
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
     for id in ids {
+        let original: Option<Option<String>> = cache
+            .query_row(
+                "SELECT name FROM original_names WHERE thread_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()?;
         state.execute(
-            "UPDATE threads SET preview = first_user_message WHERE id = ?1",
-            [&id],
+            "UPDATE threads SET preview = first_user_message, name = ?2 WHERE id = ?1",
+            (&id, original.flatten()),
         )?;
     }
     drop(statement);
@@ -734,7 +971,7 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let mut stdout = BufReader::new(child.stdout.take().ok_or("missing app-server stdout")?);
     write_jsonrpc(
         &mut stdin,
-        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.5"}}}),
+        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.6"}}}),
     )?;
     write_jsonrpc(
         &mut stdin,
@@ -746,24 +983,31 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
         serde_json::json!({"method":"hooks/list","id":2,"params":{"cwds":[cwd]}}),
     )?;
     let hooks = read_response(&mut stdout, 2)?;
-    let hook = hooks["result"]["data"][0]["hooks"]
+    let found = hooks["result"]["data"][0]["hooks"]
         .as_array()
-        .and_then(|hooks| {
-            hooks
-                .iter()
-                .find(|hook| hook["pluginId"] == "recentlydivorced@recentlydivorced")
+        .ok_or("hooks list missing")?;
+    let pairs = found
+        .iter()
+        .filter(|h| h["pluginId"] == "recentlydivorced@recentlydivorced")
+        .filter_map(|h| {
+            Some((
+                h["key"].as_str()?.to_string(),
+                h["currentHash"].as_str()?.to_string(),
+            ))
         })
-        .ok_or("RecentlyDivorced hook was not discovered by stock Codex")?;
-    let key = hook["key"].as_str().ok_or("missing hook key")?;
-    let hash = hook["currentHash"].as_str().ok_or("missing hook hash")?;
+        .collect::<Vec<_>>();
+    if pairs.is_empty() {
+        return Err("RecentlyDivorced hooks were not discovered by stock Codex".into());
+    }
+    let mut state = serde_json::Map::new();
+    for (key, hash) in pairs {
+        state.insert(key, serde_json::json!({"enabled":true,"trusted_hash":hash}));
+    }
     write_jsonrpc(
         &mut stdin,
         serde_json::json!({
             "method":"config/batchWrite","id":3,"params":{
-                "edits":[
-                    {"keyPath":"hooks.state","value":{key:{"enabled":true,"trusted_hash":hash}},"mergeStrategy":"upsert"},
-                    {"keyPath":"hooks.state.\"recentlydivorced@recentlydivorced:hooks/hooks.json:user_prompt_submit:0:0\"","value":null,"mergeStrategy":"replace"}
-                ],
+                "edits": [{"keyPath":"hooks.state","value":state,"mergeStrategy":"upsert"}],
                 "reloadUserConfig":true
             }
         }),
@@ -841,7 +1085,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             conversation_capsule(&rollout, "ignored fallback", "").unwrap(),
-            "context: camera works; sole lighting remains latest:"
+            "current activity: background: camera works; sole lighting remains recent:"
         );
     }
 
@@ -872,7 +1116,7 @@ mod tests {
         assert!(capsule.contains("objective: ship the objective"));
         assert!(capsule.contains("cursor: current cursor"));
         assert!(capsule.contains("next: perform the next action"));
-        assert!(capsule.contains("latest: user: ship the compatibility fix"));
+        assert!(capsule.contains("current activity: ship the compatibility fix"));
         assert!(!capsule.contains("Continue a prior Sol"));
         assert!(!capsule.contains("--- capsule ---"));
         assert!(capsule.chars().count() <= CAPSULE_CHARS);
@@ -911,6 +1155,7 @@ mod tests {
             inode: 0,
             length: 0,
             capsule: "goal: make /resume conversations recognizable at a glance".into(),
+            activity: "make resume labels recognizable".into(),
             prior: None,
         };
         for (batch, model) in [INITIAL_MODEL, UPDATE_MODEL].into_iter().enumerate() {

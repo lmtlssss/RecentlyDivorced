@@ -3,8 +3,8 @@
 labels every top-level human CLI conversation.
 
 ```text
-stock compaction summary ─┐
-CompactVeteran handoff    ├─► 480-char capsule ─► 12-word label ─► /resume
+current activity ─────────┐
+stock / CompactVeteran     ├─► 480-char capsule ─► 12-word label ─► /resume
 young chat ───────────────┘
 ```
 
@@ -36,6 +36,9 @@ conversation evidence stops at 480 characters.
 
 the first pass batches with Sol at low reasoning. changed-only maintenance uses
 Spark. one-line labels stay short.
+
+Recent activity is cached locally before the label pass, so the common path is
+zero-token. No context left behind; no trench wordfare required.
 
 ## uninstall
 
