@@ -48,7 +48,7 @@ fn refresh_decision(
     pending: bool,
     extracted: &str,
 ) -> RefreshDecision {
-    if !cached.is_empty() && extracted == cached {
+    if !cached.is_empty() && (extracted.is_empty() || extracted == cached) {
         RefreshDecision::Reuse
     } else if !pending && same_fingerprint && cached.is_empty() {
         RefreshDecision::Seed
@@ -974,6 +974,10 @@ fn provisional_label(prompt: &str) -> String {
         "still",
         "gotta",
         "able",
+        "be",
+        "do",
+        "its",
+        "it's",
         "most",
     ];
     let mut out = Vec::new();
@@ -982,8 +986,9 @@ fn provisional_label(prompt: &str) -> String {
         let word = raw.trim_matches(|c: char| {
             !c.is_alphanumeric() && c != '#' && c != '/' && c != '-' && c != '_'
         });
-        let stem = word.to_lowercase().trim_end_matches('s').to_string();
-        if word.is_empty() || filler.contains(&stem.as_str()) || !seen.insert(stem.clone()) {
+        let original = word.to_lowercase();
+        let stem = original.trim_end_matches('s').to_string();
+        if word.is_empty() || filler.contains(&original.as_str()) || !seen.insert(stem.clone()) {
             continue;
         }
         out.push(word.to_string());
@@ -1069,7 +1074,7 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let mut stdout = BufReader::new(child.stdout.take().ok_or("missing app-server stdout")?);
     write_jsonrpc(
         &mut stdin,
-        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.8"}}}),
+        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.9"}}}),
     )?;
     write_jsonrpc(
         &mut stdin,
@@ -1205,6 +1210,40 @@ mod tests {
         assert!(label.contains("RecentlyDivorced"));
         assert!(!label.to_lowercase().contains("conversation"));
         assert!(!label.to_lowercase().contains(" update updates"));
+    }
+
+    #[test]
+    fn exact_current_request_label_and_trivial_prompt() {
+        let prompt = "<image name=[Image #1]>ignored</image> also can you update the RecentlyDivorced so that it updates the description based on the most recent activity, so for example this conversation is still labeled partofthis it's gotta be able to do this without draining usage";
+        assert_eq!(
+            provisional_label(prompt),
+            "Update RecentlyDivorced description based recent activity labeled partofthis without draining usage"
+        );
+        assert_eq!(provisional_label("continue"), "");
+    }
+
+    #[test]
+    fn partial_tail_prefers_last_input_text_before_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("long.jsonl");
+        let prefix = "x".repeat(70_000);
+        let line = format!(
+            r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"image junk"}},{{"type":"input_text","text":"repair recent labels"}}]}}}}}}"#
+        );
+        let summary =
+            r#"{"type":"compacted","payload":{"message":"background: retained project context"}}"#;
+        std::fs::write(&path, format!("{}{}\n{}\n", prefix, line, summary)).unwrap();
+        let evidence = super::conversation_evidence(&path, "old", "", None).unwrap();
+        assert!(
+            evidence
+                .capsule
+                .starts_with("current activity: repair recent labels")
+        );
+        assert!(
+            evidence.capsule.find("background:").unwrap()
+                > evidence.capsule.find("current activity:").unwrap()
+        );
+        assert!(evidence.capsule.chars().count() <= CAPSULE_CHARS);
     }
 
     #[test]
