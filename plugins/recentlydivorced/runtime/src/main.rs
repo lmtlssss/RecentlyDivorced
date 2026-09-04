@@ -443,6 +443,7 @@ fn run_model(
     let mut prompt = String::from(
         "Label each Codex conversation for a /resume index. Return exactly one item per ID. \
          Each label is one concrete sentence fragment, at most 12 words, naming the work and current point. \
+         CURRENT ACTIVITY overrides PRIOR and BACKGROUND when they disagree. \
          No generic phrases such as 'discussion about', no IDs inside labels, no markdown.\n",
     );
     for job in jobs {
@@ -614,6 +615,18 @@ fn conversation_evidence(
             tail.pop_front();
         }
     }
+    let latest = tail
+        .iter()
+        .rev()
+        .find(|message| message.starts_with("user: "))
+        .map(|message| compact_text(message.strip_prefix("user: ").unwrap_or(message), 180))
+        .unwrap_or_default();
+    let recovered = if latest.is_empty() {
+        partial_activity
+    } else {
+        latest.clone()
+    };
+    let current_activity = pending.filter(|s| !s.is_empty()).unwrap_or(&recovered);
     if let Some(summary) = context_summary.filter(|summary| !summary.is_empty()) {
         let latest = tail
             .iter()
@@ -621,15 +634,19 @@ fn conversation_evidence(
             .find(|message| message.starts_with("user: "))
             .map(|message| compact_text(message, 110))
             .unwrap_or_default();
-        let activity = pending
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| latest.strip_prefix("user: ").unwrap_or(""));
         return Some(Evidence {
             capsule: compact_text(
-                &format!("current activity: {activity}\nbackground: {summary}\nrecent: {latest}"),
+                &format!(
+                    "{}background: {summary}\nrecent: {latest}",
+                    if current_activity.is_empty() {
+                        String::new()
+                    } else {
+                        format!("current activity: {current_activity}\n")
+                    }
+                ),
                 CAPSULE_CHARS,
             ),
-            activity: compact_text(activity, CAPSULE_CHARS),
+            activity: compact_text(current_activity, CAPSULE_CHARS),
         });
     }
     if let Some(base) = embedded {
@@ -639,31 +656,23 @@ fn conversation_evidence(
             .find(|message| message.starts_with("user: "))
             .map(|message| compact_text(message, 110))
             .unwrap_or_default();
-        let activity = pending
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| latest.strip_prefix("user: ").unwrap_or(""));
         return Some(Evidence {
             capsule: compact_text(
-                &format!("current activity: {activity}\nbackground: {base}\nrecent: {latest}"),
+                &format!(
+                    "{}background: {base}\nrecent: {latest}",
+                    if current_activity.is_empty() {
+                        String::new()
+                    } else {
+                        format!("current activity: {current_activity}\n")
+                    }
+                ),
                 CAPSULE_CHARS,
             ),
-            activity: compact_text(activity, CAPSULE_CHARS),
+            activity: compact_text(current_activity, CAPSULE_CHARS),
         });
     }
     let mut capsule = String::new();
-    let latest = tail
-        .iter()
-        .rev()
-        .find(|message| message.starts_with("user: "))
-        .map(|message| message.strip_prefix("user: ").unwrap_or(message))
-        .unwrap_or("")
-        .to_string();
-    let recovered = if partial_activity.is_empty() {
-        latest.clone()
-    } else {
-        partial_activity
-    };
-    let activity = pending.filter(|s| !s.is_empty()).unwrap_or(&recovered);
+    let activity = current_activity;
     if !activity.is_empty() {
         capsule.push_str("current activity: ");
         capsule.push_str(activity);
@@ -691,10 +700,13 @@ fn conversation_evidence(
 
 fn recover_partial_text(line: &[u8]) -> String {
     let text = String::from_utf8_lossy(line);
-    let Some(start) = text.find("\"text\":\"") else {
+    let Some(start) = text.rfind("\"type\":\"input_text\"") else {
         return String::new();
     };
-    let fragment = &text[start + 8..];
+    let Some(text_start) = text[start..].find("\"text\":\"") else {
+        return String::new();
+    };
+    let fragment = &text[start + text_start + 8..];
     let mut encoded = String::new();
     let mut escaped = false;
     for ch in fragment.chars() {
@@ -1085,7 +1097,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             conversation_capsule(&rollout, "ignored fallback", "").unwrap(),
-            "current activity: background: camera works; sole lighting remains recent:"
+            "background: camera works; sole lighting remains recent:"
         );
     }
 
