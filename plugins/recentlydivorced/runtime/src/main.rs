@@ -35,6 +35,30 @@ struct Evidence {
     activity: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshDecision {
+    Reuse,
+    Seed,
+    Relabel,
+}
+
+fn refresh_decision(
+    cached: &str,
+    same_fingerprint: bool,
+    pending: bool,
+    extracted: &str,
+) -> RefreshDecision {
+    if !pending && same_fingerprint && !cached.is_empty() && extracted.is_empty() {
+        RefreshDecision::Reuse
+    } else if !pending && same_fingerprint && cached.is_empty() {
+        RefreshDecision::Seed
+    } else if !pending && !extracted.is_empty() && extracted == cached {
+        RefreshDecision::Reuse
+    } else {
+        RefreshDecision::Relabel
+    }
+}
+
 #[derive(Deserialize)]
 struct ModelLabels {
     labels: Vec<ModelLabel>,
@@ -234,23 +258,33 @@ fn run_labels_locked(
                 },
             )
             .optional()?;
-        if let Some((dev, inode, length, label, cached_activity)) = &cached {
-            let current = pending.as_deref().unwrap_or("");
-            if !current.is_empty() {
-                if current == cached_activity {
-                    cached_projection.push((id.clone(), label.clone()));
-                    continue;
-                }
-            } else if (*dev, *inode, *length) == fingerprint {
-                cached_projection.push((id.clone(), label.clone()));
-                continue;
-            }
-        }
         let Some(evidence) =
             conversation_evidence(&path, &first_user_message, &preview, pending.as_deref())
         else {
             continue;
         };
+        if let Some((dev, inode, length, label, cached_activity)) = &cached {
+            let extracted = evidence.activity.as_str();
+            let effective = if extracted.is_empty() {
+                cached_activity.as_str()
+            } else {
+                extracted
+            };
+            let decision = refresh_decision(
+                cached_activity,
+                (*dev, *inode, *length) == fingerprint,
+                pending.as_ref().is_some_and(|p| !p.is_empty()),
+                effective,
+            );
+            if decision != RefreshDecision::Relabel {
+                let tx = cache.unchecked_transaction()?;
+                tx.execute("UPDATE summaries SET dev=?1,inode=?2,processed_len=?3,activity=?4 WHERE thread_id=?5", (fingerprint.0, fingerprint.1, fingerprint.2, effective, &id))?;
+                tx.execute("DELETE FROM pending_activity WHERE thread_id=?1", [&id])?;
+                tx.commit()?;
+                cached_projection.push((id.clone(), label.clone()));
+                continue;
+            }
+        }
         let job = Job {
             id,
             path,
@@ -936,16 +970,15 @@ fn provisional_label(prompt: &str) -> String {
         "most",
     ];
     let mut out = Vec::new();
-    let mut prev = String::new();
+    let mut seen = HashSet::new();
     for raw in prompt.split_whitespace() {
         let word = raw.trim_matches(|c: char| {
             !c.is_alphanumeric() && c != '#' && c != '/' && c != '-' && c != '_'
         });
         let stem = word.to_lowercase().trim_end_matches('s').to_string();
-        if word.is_empty() || filler.contains(&stem.as_str()) || stem == prev {
+        if word.is_empty() || filler.contains(&stem.as_str()) || !seen.insert(stem.clone()) {
             continue;
         }
-        prev = stem;
         out.push(word.to_string());
         if out.len() == 12 {
             break;
@@ -994,16 +1027,22 @@ fn restore_stock() -> Result<(), Box<dyn Error>> {
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
     for id in ids {
-        let original: Option<Option<String>> = cache
-            .query_row(
-                "SELECT name FROM original_names WHERE thread_id=?1",
-                [&id],
-                |r| r.get(0),
-            )
-            .optional()?;
+        state.execute(
+            "UPDATE threads SET preview = first_user_message WHERE id = ?1",
+            [&id],
+        )?;
+    }
+    let originals = cache
+        .prepare("SELECT thread_id, name FROM original_names")?
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    for (id, name) in originals {
         state.execute(
             "UPDATE threads SET preview = first_user_message, name = ?2 WHERE id = ?1",
-            (&id, original.flatten()),
+            (&id, name),
         )?;
     }
     drop(statement);
@@ -1104,8 +1143,8 @@ fn unix_time() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPSULE_CHARS, HUMAN_THREAD_FILTER, INITIAL_MODEL, Job, UPDATE_MODEL, conversation_capsule,
-        normalize_label, run_model,
+        CAPSULE_CHARS, HUMAN_THREAD_FILTER, INITIAL_MODEL, Job, RefreshDecision, UPDATE_MODEL,
+        conversation_capsule, normalize_label, provisional_label, refresh_decision, run_model,
     };
     use rusqlite::Connection;
 
@@ -1148,6 +1187,36 @@ mod tests {
                 "  building   the resume index with compact conversation labels that stay useful after updates forever  "
             ),
             "building the resume index with compact conversation labels that stay useful after"
+        );
+    }
+
+    #[test]
+    fn activity_label_is_concise_and_dedupes_plural_stems() {
+        let label = provisional_label(
+            "Please update updates RecentlyDivorced description for recent activity on PartOfThis usage [Image #1]",
+        );
+        assert!(label.contains("RecentlyDivorced"));
+        assert!(!label.to_lowercase().contains("conversation"));
+        assert!(!label.to_lowercase().contains(" update updates"));
+    }
+
+    #[test]
+    fn refresh_decisions_cover_reuse_seed_and_relabel() {
+        assert_eq!(
+            refresh_decision("activity", true, false, ""),
+            RefreshDecision::Reuse
+        );
+        assert_eq!(
+            refresh_decision("", true, false, "new"),
+            RefreshDecision::Seed
+        );
+        assert_eq!(
+            refresh_decision("old", false, true, "new"),
+            RefreshDecision::Relabel
+        );
+        assert_eq!(
+            refresh_decision("same", false, false, "same"),
+            RefreshDecision::Reuse
         );
     }
 
