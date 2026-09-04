@@ -183,7 +183,7 @@ fn run_labels_locked(
     let state = Connection::open(state_path)?;
     state.busy_timeout(std::time::Duration::from_secs(10))?;
     let mut statement = state.prepare(
-        &format!("SELECT id, rollout_path, first_user_message, preview FROM threads WHERE {HUMAN_THREAD_FILTER}"),
+        &format!("SELECT id, rollout_path, first_user_message, preview, name FROM threads WHERE {HUMAN_THREAD_FILTER}"),
     )?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -191,6 +191,7 @@ fn run_labels_locked(
             PathBuf::from(row.get::<_, String>(1)?),
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
 
@@ -198,7 +199,11 @@ fn run_labels_locked(
     let mut changed = Vec::new();
     let mut cached_projection = Vec::new();
     for row in rows.filter_map(Result::ok) {
-        let (id, path, first_user_message, preview) = row;
+        let (id, path, first_user_message, preview, original_name) = row;
+        cache.execute(
+            "INSERT OR IGNORE INTO original_names(thread_id,name) VALUES (?1,?2)",
+            (&id, original_name.as_deref()),
+        )?;
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
@@ -891,9 +896,44 @@ fn provisional_label(prompt: &str) -> String {
         return String::new();
     }
     let filler = [
-        "please", "can", "you", "could", "would", "just", "help", "me", "i", "need", "want", "to",
-        "the", "a", "an", "and", "also", "now", "make", "it", "this", "that", "is", "are", "have",
-        "has", "we", "our", "my",
+        "please",
+        "can",
+        "you",
+        "could",
+        "would",
+        "just",
+        "help",
+        "me",
+        "i",
+        "need",
+        "want",
+        "to",
+        "the",
+        "a",
+        "an",
+        "and",
+        "also",
+        "now",
+        "make",
+        "it",
+        "this",
+        "that",
+        "is",
+        "are",
+        "have",
+        "has",
+        "we",
+        "our",
+        "my",
+        "so",
+        "on",
+        "for",
+        "example",
+        "conversation",
+        "still",
+        "gotta",
+        "able",
+        "most",
     ];
     let mut out = Vec::new();
     let mut prev = String::new();
@@ -901,7 +941,7 @@ fn provisional_label(prompt: &str) -> String {
         let word = raw.trim_matches(|c: char| {
             !c.is_alphanumeric() && c != '#' && c != '/' && c != '-' && c != '_'
         });
-        let stem = word.to_lowercase();
+        let stem = word.to_lowercase().trim_end_matches('s').to_string();
         if word.is_empty() || filler.contains(&stem.as_str()) || stem == prev {
             continue;
         }
@@ -983,7 +1023,7 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let mut stdout = BufReader::new(child.stdout.take().ok_or("missing app-server stdout")?);
     write_jsonrpc(
         &mut stdin,
-        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.6"}}}),
+        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.8"}}}),
     )?;
     write_jsonrpc(
         &mut stdin,
