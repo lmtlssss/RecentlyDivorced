@@ -10,13 +10,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod preview;
+
 const INITIAL_MODEL: &str = "gpt-5.6-sol";
 const UPDATE_MODEL: &str = "gpt-5.3-codex-spark";
-const CAPSULE_CHARS: usize = 480;
+const CAPSULE_CHARS: usize = 1_500;
 const TAIL_BYTES: u64 = 65_536;
 const LOCK_TTL_SECONDS: i64 = 21_600;
 const HUMAN_THREAD_FILTER: &str =
     "source = 'cli' AND thread_source = 'user' AND agent_role IS NULL AND rollout_path <> ''";
+const CACHE_GENERATION: &str = "source-ladder-v3";
 
 #[derive(Clone)]
 struct Job {
@@ -27,12 +30,12 @@ struct Job {
     length: i64,
     capsule: String,
     activity: String,
+    pending: Option<String>,
     prior: Option<String>,
 }
 
 struct Evidence {
     capsule: String,
-    activity: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,6 +84,7 @@ fn main() {
         "--catch-up" => run_labels(true),
         "--refresh" if env::var_os("RECENTLYDIVORCED_INTERNAL").is_none() => run_labels(false),
         "--estimate" => print_estimate(),
+        "--preview" => preview::run(),
         "--activity" => {
             let _ = activity_hook();
             Ok(())
@@ -108,6 +112,7 @@ fn paths() -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
 fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
     fs::create_dir_all(plugin_data)?;
     let connection = Connection::open(plugin_data.join("state.sqlite"))?;
+    connection.busy_timeout(std::time::Duration::from_secs(10))?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS summaries (
             thread_id TEXT PRIMARY KEY,
@@ -141,11 +146,11 @@ fn open_cache(plugin_data: &Path) -> Result<Connection, Box<dyn Error>> {
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if generation.as_deref() != Some("source-ladder-v2") {
+    if generation.as_deref() != Some(CACHE_GENERATION) {
         connection.execute("DELETE FROM summaries", [])?;
         connection.execute("DELETE FROM meta WHERE key = 'bootstrap_complete'", [])?;
         connection.execute(
-            "INSERT INTO meta VALUES ('capsule_generation', 'source-ladder-v2')
+            "INSERT INTO meta VALUES ('capsule_generation', 'source-ladder-v3')
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [],
         )?;
@@ -256,22 +261,14 @@ fn run_labels_locked(
                 },
             )
             .optional()?;
-        if let Some((dev, inode, length, label, cached_activity)) = &cached {
-            if pending.as_deref().unwrap_or("").is_empty()
-                && (*dev, *inode, *length) == fingerprint
-                && !cached_activity.is_empty()
-            {
-                cached_projection.push((id.clone(), label.clone()));
-                continue;
-            }
-        }
-        let Some(evidence) =
+        let Some(mut evidence) =
             conversation_evidence(&path, &first_user_message, &preview, pending.as_deref())
         else {
             continue;
         };
+        evidence.capsule = preview::augment(state_path, &id, evidence.capsule);
         if let Some((dev, inode, length, label, cached_activity)) = &cached {
-            let extracted = evidence.activity.as_str();
+            let extracted = evidence.capsule.as_str();
             let effective = if extracted.is_empty() {
                 cached_activity.as_str()
             } else {
@@ -286,7 +283,10 @@ fn run_labels_locked(
             if decision != RefreshDecision::Relabel {
                 let tx = cache.unchecked_transaction()?;
                 tx.execute("UPDATE summaries SET dev=?1,inode=?2,processed_len=?3,activity=?4 WHERE thread_id=?5", (fingerprint.0, fingerprint.1, fingerprint.2, effective, &id))?;
-                tx.execute("DELETE FROM pending_activity WHERE thread_id=?1", [&id])?;
+                tx.execute(
+                    "DELETE FROM pending_activity WHERE thread_id=?1 AND activity=?2",
+                    (&id, pending.as_deref().unwrap_or("")),
+                )?;
                 tx.commit()?;
                 cached_projection.push((id.clone(), label.clone()));
                 continue;
@@ -298,8 +298,9 @@ fn run_labels_locked(
             dev: fingerprint.0,
             inode: fingerprint.1,
             length: fingerprint.2,
-            capsule: evidence.capsule,
-            activity: evidence.activity,
+            capsule: evidence.capsule.clone(),
+            activity: evidence.capsule.clone(),
+            pending: pending.clone(),
             prior: cached.map(|cached| cached.3),
         };
         if job.prior.is_some() || !bootstrap {
@@ -382,8 +383,12 @@ fn process_jobs(
                             &job.activity,
                         ),
                     )?;
-                    cache_transaction
-                        .execute("DELETE FROM pending_activity WHERE thread_id=?1", [&job.id])?;
+                    if let Some(pending) = &job.pending {
+                        cache_transaction.execute(
+                            "DELETE FROM pending_activity WHERE thread_id=?1 AND activity=?2",
+                            (&job.id, pending),
+                        )?;
+                    }
                 }
                 cache_transaction.commit()?;
                 done += labels.len();
@@ -456,7 +461,7 @@ fn batches(model: &str, jobs: Vec<Job>) -> Vec<Vec<Job>> {
     batches
 }
 
-fn run_model(
+pub(crate) fn run_model(
     model: &str,
     jobs: &[Job],
     plugin_data: &Path,
@@ -488,9 +493,9 @@ fn run_model(
 
     let mut prompt = String::from(
         "Label each Codex conversation for a /resume index. Return exactly one item per ID. \
-         Each label is one concrete sentence fragment, at most 12 words, naming the work and current point. \
-         CURRENT ACTIVITY overrides PRIOR and BACKGROUND when they disagree. \
-         No generic phrases such as 'discussion about', no IDs inside labels, no markdown.\n",
+         Each label is one recognizable project/task plus its outcome or current point, at most 12 natural words. \
+         Use PRIOR and BACKGROUND with recent human and assistant context; short follow-ups must not replace that context. \
+         Never copy a command, acknowledgment, hook wrapper, or raw prompt fragment. No generic phrases, IDs, or markdown.\n",
     );
     for job in jobs {
         prompt.push_str("\nID ");
@@ -563,20 +568,17 @@ fn run_model(
     Ok(labels)
 }
 
-fn conversation_evidence(
+pub(crate) fn conversation_evidence(
     path: &Path,
     first_user: &str,
-    preview: &str,
+    _preview: &str,
     pending: Option<&str>,
 ) -> Option<Evidence> {
     let mut embedded = embedded_capsule(first_user);
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(_) => {
-            return embedded.map(|capsule| Evidence {
-                capsule,
-                activity: pending.unwrap_or("").to_string(),
-            });
+            return embedded.map(|capsule| Evidence { capsule });
         }
     };
     let length = file.metadata().ok()?.len();
@@ -657,7 +659,7 @@ fn conversation_evidence(
             continue;
         }
         tail.push_back(format!("{role}: {text}"));
-        if tail.len() > 3 {
+        if tail.len() > 6 {
             tail.pop_front();
         }
     }
@@ -672,56 +674,13 @@ fn conversation_evidence(
     } else {
         latest.clone()
     };
-    let current_activity = pending.filter(|s| !s.is_empty()).unwrap_or(&recovered);
-    if let Some(summary) = context_summary.filter(|summary| !summary.is_empty()) {
-        let latest = tail
-            .iter()
-            .rev()
-            .find(|message| message.starts_with("user: "))
-            .map(|message| compact_text(message, 110))
-            .unwrap_or_default();
-        return Some(Evidence {
-            capsule: compact_text(
-                &format!(
-                    "{}background: {summary}\nrecent: {latest}",
-                    if current_activity.is_empty() {
-                        String::new()
-                    } else {
-                        format!("current activity: {current_activity}\n")
-                    }
-                ),
-                CAPSULE_CHARS,
-            ),
-            activity: compact_text(current_activity, CAPSULE_CHARS),
-        });
-    }
-    if let Some(base) = embedded {
-        let latest = tail
-            .iter()
-            .rev()
-            .find(|message| message.starts_with("user: "))
-            .map(|message| compact_text(message, 110))
-            .unwrap_or_default();
-        return Some(Evidence {
-            capsule: compact_text(
-                &format!(
-                    "{}background: {base}\nrecent: {latest}",
-                    if current_activity.is_empty() {
-                        String::new()
-                    } else {
-                        format!("current activity: {current_activity}\n")
-                    }
-                ),
-                CAPSULE_CHARS,
-            ),
-            activity: compact_text(current_activity, CAPSULE_CHARS),
-        });
-    }
+    let current_activity =
+        compact_text(pending.filter(|s| !s.is_empty()).unwrap_or(&recovered), 180);
     let mut capsule = String::new();
-    let activity = current_activity;
-    if !activity.is_empty() {
-        capsule.push_str("current activity: ");
-        capsule.push_str(activity);
+    let background = context_summary.or(embedded).unwrap_or_default();
+    if !background.is_empty() {
+        capsule.push_str("background: ");
+        capsule.push_str(&compact_text(&background, 400));
         capsule.push('\n');
     }
     let first = compact_text(first_user, 180);
@@ -730,17 +689,27 @@ fn conversation_evidence(
         capsule.push_str(&first);
         capsule.push('\n');
     }
-    let preview = compact_text(preview, 120);
-    if !preview.is_empty() && preview != first {
-        capsule.push_str("previous index: ");
-        capsule.push_str(&preview);
+    if let Some(outcome) = tail
+        .iter()
+        .rev()
+        .find(|message| message.starts_with("assistant: "))
+    {
+        capsule.push_str("outcome: ");
+        capsule.push_str(&compact_text(
+            outcome.strip_prefix("assistant: ").unwrap_or(outcome),
+            300,
+        ));
+        capsule.push('\n');
+    }
+    if !current_activity.is_empty() {
+        capsule.push_str("current activity: ");
+        capsule.push_str(&current_activity);
         capsule.push('\n');
     }
     capsule.push_str(&tail.into_iter().collect::<Vec<_>>().join("\n"));
     let capsule = compact_text(&capsule, CAPSULE_CHARS);
     (!capsule.is_empty()).then_some(Evidence {
         capsule: compact_text(&capsule, CAPSULE_CHARS),
-        activity: compact_text(activity, CAPSULE_CHARS),
     })
 }
 
@@ -778,6 +747,8 @@ fn synthetic_prompt(text: &str) -> bool {
         || text.contains("<skills_instructions>")
         || text.contains("<permissions instructions>")
         || text.contains("<collaboration_mode>")
+        || text.contains("<codex_internal_context")
+        || text.contains("Continue working toward the active thread goal")
         || text.contains("--- capsule ---")
         || (text.starts_with("Read ")
             && text.contains("/project-maps/")
@@ -890,15 +861,14 @@ fn activity_hook() -> Result<(), Box<dyn Error>> {
     };
     let stripped = strip_images(&event.prompt);
     let original = compact_text(&stripped, CAPSULE_CHARS);
-    let activity = provisional_label(&original);
-    if activity.is_empty() {
+    if provisional_label(&original).is_empty() {
         return Ok(());
     }
     let (state_path, plugin_data) = paths()?;
     let state = Connection::open(state_path)?;
     let Some(old): Option<Option<String>> = state
         .query_row(
-            "SELECT name FROM threads WHERE id = ?1",
+            &format!("SELECT name FROM threads WHERE id = ?1 AND {HUMAN_THREAD_FILTER}"),
             [&event.session_id],
             |r| r.get(0),
         )
@@ -909,12 +879,6 @@ fn activity_hook() -> Result<(), Box<dyn Error>> {
     let cache = open_cache(&plugin_data)?;
     cache.execute("INSERT INTO original_names(thread_id,name) VALUES (?1,?2) ON CONFLICT(thread_id) DO NOTHING", (&event.session_id, old.as_deref()))?;
     cache.execute("INSERT INTO pending_activity(thread_id,activity) VALUES (?1,?2) ON CONFLICT(thread_id) DO UPDATE SET activity=excluded.activity", (&event.session_id, &original))?;
-    let tx = state.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE threads SET name=?1, preview=?1 WHERE id=?2",
-        (&activity, &event.session_id),
-    )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -1074,7 +1038,7 @@ fn trust_installed_hook() -> Result<(), Box<dyn Error>> {
     let mut stdout = BufReader::new(child.stdout.take().ok_or("missing app-server stdout")?);
     write_jsonrpc(
         &mut stdin,
-        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.10"}}}),
+        serde_json::json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"recentlydivorced-installer","version":"0.3.11"}}}),
     )?;
     write_jsonrpc(
         &mut stdin,
@@ -1156,9 +1120,11 @@ fn unix_time() -> i64 {
 mod tests {
     use super::{
         CAPSULE_CHARS, HUMAN_THREAD_FILTER, INITIAL_MODEL, Job, RefreshDecision, UPDATE_MODEL,
-        conversation_capsule, normalize_label, provisional_label, refresh_decision, run_model,
+        conversation_capsule, conversation_evidence, normalize_label, provisional_label,
+        refresh_decision, run_model,
     };
     use rusqlite::Connection;
+    use std::io::Write;
 
     #[test]
     fn capsule_is_small_and_keeps_the_human_goal_and_tail() {
@@ -1188,7 +1154,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             conversation_capsule(&rollout, "ignored fallback", "").unwrap(),
-            "background: camera works; sole lighting remains recent:"
+            "background: camera works; sole lighting remains goal: ignored fallback"
         );
     }
 
@@ -1237,11 +1203,11 @@ mod tests {
         assert!(
             evidence
                 .capsule
-                .starts_with("current activity: repair recent labels")
+                .contains("current activity: repair recent labels")
         );
         assert!(
             evidence.capsule.find("background:").unwrap()
-                > evidence.capsule.find("current activity:").unwrap()
+                < evidence.capsule.find("current activity:").unwrap()
         );
         assert!(evidence.capsule.chars().count() <= CAPSULE_CHARS);
     }
@@ -1316,6 +1282,55 @@ mod tests {
     }
 
     #[test]
+    fn capsule_ignores_generated_preview_labels() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("preview.jsonl");
+        let line = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Build boot viewer"}]}}).to_string();
+        std::fs::write(&path, line).unwrap();
+        assert_eq!(
+            conversation_capsule(&path, "Build boot viewer", "Old label"),
+            conversation_capsule(&path, "Build boot viewer", "New label")
+        );
+    }
+
+    #[test]
+    fn capsule_changes_for_new_assistant_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("outcome.jsonl");
+        let user = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Build boot viewer"}]}}).to_string();
+        let first = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"camera work started"}]}}).to_string();
+        std::fs::write(&path, format!("{user}\n{first}\n")).unwrap();
+        let before = conversation_capsule(&path, "Build boot viewer", "").unwrap();
+        let second = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"Boot camera shipped"}]}}).to_string();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("{second}\n").as_bytes())
+            .unwrap();
+        let after = conversation_capsule(&path, "Build boot viewer", "").unwrap();
+        assert_ne!(before, after);
+        assert!(after.contains("Boot camera shipped"));
+    }
+
+    #[test]
+    fn capsule_keeps_goal_and_latest_outcome_with_long_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bounded.jsonl");
+        let mut lines = vec![serde_json::json!({"type":"compacted","payload":{"message":"boot viewer background"}}).to_string(), serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Build boot viewer"}]}}).to_string()];
+        for i in 0..5 {
+            lines.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":format!("tune camera pass {i}")}]}}).to_string());
+        }
+        lines.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"Boot camera shipped"}]}}).to_string());
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let evidence =
+            conversation_evidence(&path, "Build boot viewer", "", Some(&"x".repeat(1500))).unwrap();
+        assert!(evidence.capsule.chars().count() <= CAPSULE_CHARS);
+        assert!(evidence.capsule.contains("Build boot viewer"));
+        assert!(evidence.capsule.contains("Boot camera shipped"));
+    }
+
+    #[test]
     #[ignore = "uses live Codex model usage"]
     fn configured_models_return_structured_fingertip_labels() {
         let temp = tempfile::tempdir().unwrap();
@@ -1327,6 +1342,7 @@ mod tests {
             length: 0,
             capsule: "goal: make /resume conversations recognizable at a glance".into(),
             activity: "make resume labels recognizable".into(),
+            pending: None,
             prior: None,
         };
         for (batch, model) in [INITIAL_MODEL, UPDATE_MODEL].into_iter().enumerate() {

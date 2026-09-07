@@ -3,8 +3,8 @@
 labels every top-level human CLI conversation.
 
 ```text
-current activity ─────────┐
-stock / CompactVeteran     ├─► 480-char capsule ─► 12-word label ─► /resume
+pending activity ─────────┐
+stock / CompactVeteran     ├─► 1500-char capsule ─► 12-word label ─► /resume
 young chat ───────────────┘
 ```
 
@@ -27,18 +27,29 @@ sh install.sh
 the source ladder is:
 
 1. stock compaction summary, plus the latest user turn;
-2. CompactVeteran Objective + Cursor + Next action;
-3. young first ask + latest three semantic turns.
+2. optional read-only GraphFather objective + Cursor + Next action;
+3. young first ask + latest six semantic turns.
 
 legacy and paginated top-level human CLI rows are covered. subagents, exec,
 fork, and internal threads are excluded. local rollout reading stops at 64 KiB;
-conversation evidence stops at 480 characters.
+conversation evidence stops at 1500 characters.
 
 the first pass batches with Sol at low reasoning. changed-only maintenance uses
 Spark. one-line labels stay short.
 
-Recent activity is cached locally before the label pass, so the common path is
-zero-token. No context left behind; no trench wordfare required.
+Meaningful activity is queued locally on prompt submit. Labels refresh
+asynchronously after a response, so typing never replaces a good title with a
+raw prompt fragment.
+
+To inspect labels without changing the cache or production thread titles, pass
+one or more IDs to the read-only preview command:
+
+```bash
+recentlydivorced --preview THREAD_ID [THREAD_ID ...]
+```
+
+The preview combines the optional GraphFather context with recent conversation
+evidence and returns JSON labels and capsules.
 
 ## uninstall
 

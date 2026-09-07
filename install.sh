@@ -19,8 +19,15 @@ plugin_root="$(printf '%s\n' "$install_json" | sed -n 's/^[[:space:]]*"installed
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 plugin_data="$codex_home/plugins/data/recentlydivorced-recentlydivorced"
 mkdir -p "$plugin_data"
-curl --fail --silent --show-error --location "https://github.com/$repo/releases/latest/download/$asset" -o "$plugin_data/recentlydivorced"
-chmod 0755 "$plugin_data/recentlydivorced"
+target="$plugin_data/recentlydivorced"
+download_tmp="$(mktemp "$plugin_data/.recentlydivorced.XXXXXX")"
+trap 'rm -f "$download_tmp"' EXIT INT TERM
+if [ -f "$target" ]; then
+  cp -p "$target" "$target.prev"
+fi
+curl --fail --silent --show-error --location "https://github.com/$repo/releases/latest/download/$asset" -o "$download_tmp"
+chmod 0755 "$download_tmp"
+mv -f "$download_tmp" "$target"
 "$plugin_data/recentlydivorced" --trust
 if [ "${RECENTLYDIVORCED_SKIP_CATCH_UP:-0}" = 1 ]; then
   printf '%s\n' "Archive catch-up and estimate skipped."
