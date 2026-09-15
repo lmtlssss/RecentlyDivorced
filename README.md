@@ -35,7 +35,7 @@ fork, and internal threads are excluded. local rollout reading stops at 64 KiB;
 conversation evidence stops at 1500 characters.
 
 the first pass batches with Sol at low reasoning. changed-only maintenance uses
-Spark. one-line labels stay short.
+Luna at low reasoning. one-line labels stay short.
 
 Meaningful activity is queued locally on prompt submit. Labels refresh
 asynchronously after a response, so typing never replaces a good title with a

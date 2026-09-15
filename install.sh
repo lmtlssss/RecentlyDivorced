@@ -34,7 +34,7 @@ if [ "${RECENTLYDIVORCED_SKIP_CATCH_UP:-0}" = 1 ]; then
 else
   estimate="$(PLUGIN_DATA="$plugin_data" "$plugin_data/recentlydivorced" --estimate)"
   printf '%s\n' "Estimate: $estimate. The first uncached pass uses gpt-5.6-sol at low reasoning."
-  printf '%s\n' "This consumes Codex usage. Later launches use gpt-5.3-codex-spark only for changed conversations."
+  printf '%s\n' "This consumes Codex usage. Later launches use gpt-5.6-luna at low reasoning only for changed conversations."
   if ! PLUGIN_DATA="$plugin_data" "$plugin_data/recentlydivorced" --catch-up; then
     printf '%s\n' "Archive catch-up paused; the next Codex launch will retry it." >&2
   fi
