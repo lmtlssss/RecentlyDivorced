@@ -55,7 +55,7 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             prior: None,
         });
     }
-    let labels = run_model("gpt-5.6-sol", &jobs, temp.path(), 0)?;
+    let labels = run_model("gpt-6-sol", &jobs, temp.path(), 0)?;
     let output: Vec<Preview> = jobs
         .into_iter()
         .map(|job| Preview {

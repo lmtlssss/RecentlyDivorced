@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod preview;
 
-const INITIAL_MODEL: &str = "gpt-5.6-sol";
-const UPDATE_MODEL: &str = "gpt-5.6-luna";
+const INITIAL_MODEL: &str = "gpt-6-sol";
+const UPDATE_MODEL: &str = "gpt-6-luna";
 const CAPSULE_CHARS: usize = 1_500;
 const TAIL_BYTES: u64 = 65_536;
 const LOCK_TTL_SECONDS: i64 = 21_600;
