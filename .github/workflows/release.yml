@@ -19,6 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: build hook helper
         run: cargo build --release --locked --manifest-path plugins/recentlydivorced/runtime/Cargo.toml
+      - name: prove release binary
+        run: RD_BIN="$PWD/plugins/recentlydivorced/runtime/target/release/recentlydivorced" python3 scripts/prove-labels.py
       - name: publish helper
         env:
           GH_TOKEN: ${{ github.token }}

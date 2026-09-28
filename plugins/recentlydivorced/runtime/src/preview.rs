@@ -1,4 +1,4 @@
-use super::{Job, conversation_evidence, paths, run_model};
+use super::{HUMAN_THREAD_FILTER, Job, label_context, paths, run_model, substantive};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::env;
@@ -26,7 +26,7 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
     for id in ids {
         let row = state
             .query_row(
-                "SELECT rollout_path, first_user_message, preview FROM threads WHERE id=?1",
+                &format!("SELECT rollout_path, first_user_message, preview FROM threads WHERE id=?1 AND {HUMAN_THREAD_FILTER}"),
                 [&id],
                 |row| {
                     Ok((
@@ -39,9 +39,9 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             .optional()?
             .ok_or_else(|| format!("thread not found: {id}"))?;
         let path = Path::new(&row.0).to_path_buf();
-        let evidence = conversation_evidence(&path, &row.1, &row.2, None)
-            .ok_or_else(|| format!("conversation evidence unavailable: {id}"))?;
-        let capsule = augment(&state_path, &id, evidence.capsule);
+        let capsule = label_context(&state_path, &id, &path, &row.1, &row.2, None)
+            .map(|evidence| evidence.capsule)
+            .unwrap_or_default();
         let metadata = fs::metadata(&path)?;
         jobs.push(Job {
             id,
@@ -53,9 +53,22 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             capsule,
             pending: None,
             prior: None,
+            expected_name: None,
+            revision: 0,
         });
     }
-    let labels = run_model("gpt-6-sol", &jobs, temp.path(), 0)?;
+    let eligible: Vec<Job> = jobs
+        .iter()
+        .filter(|job| !job.capsule.is_empty())
+        .cloned()
+        .collect();
+    let mut labels = std::collections::HashMap::new();
+    for (batch, jobs) in super::batches(super::INITIAL_MODEL, eligible)
+        .into_iter()
+        .enumerate()
+    {
+        labels.extend(run_model(super::INITIAL_MODEL, &jobs, temp.path(), batch)?);
+    }
     let output: Vec<Preview> = jobs
         .into_iter()
         .map(|job| Preview {
@@ -117,7 +130,7 @@ pub(super) fn graph_context(state_path: &Path, id: &str) -> Option<String> {
         .pointer("/phase")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if objective.is_empty() && next.is_empty() && phase.is_empty() {
+    if !substantive(objective) && !substantive(next) {
         return None;
     }
     let objective: String = objective.chars().take(240).collect();
